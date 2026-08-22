@@ -1,0 +1,59 @@
+{
+  "match_id": "demo-match-001",
+  "events": [
+    {
+      "timestamp": 10.0,
+      "event_type": "pass",
+      "team": "Team A",
+      "x": 48.0,
+      "y": 33.0,
+      "end_x": 70.0,
+      "end_y": 29.0,
+      "outcome": "complete",
+      "xt_before": 0.03,
+      "xt_after": 0.09
+    },
+    {
+      "timestamp": 13.0,
+      "event_type": "carry",
+      "team": "Team A",
+      "x": 70.0,
+      "y": 29.0,
+      "end_x": 90.0,
+      "end_y": 35.0,
+      "outcome": "complete",
+      "xt_before": 0.09,
+      "xt_after": 0.22
+    },
+    {
+      "timestamp": 16.0,
+      "event_type": "shot",
+      "team": "Team A",
+      "x": 92.0,
+      "y": 35.0,
+      "outcome": "saved",
+      "xg": 0.36
+    },
+    {
+      "timestamp": 25.0,
+      "event_type": "pass",
+      "team": "Team B",
+      "x": 39.0,
+      "y": 43.0,
+      "end_x": 45.0,
+      "end_y": 40.0,
+      "outcome": "complete",
+      "xt_before": 0.02,
+      "xt_after": 0.025
+    },
+    {
+      "timestamp": 28.0,
+      "event_type": "turnover",
+      "team": "Team B",
+      "x": 45.0,
+      "y": 40.0,
+      "outcome": "lost"
+    }
+  ]
+}
+

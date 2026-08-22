@@ -1,0 +1,29 @@
+{
+  "attack_id": "demo-ineffective-001",
+  "team": "Team B",
+  "start_sec": 300.0,
+  "end_sec": 305.0,
+  "events": [
+    {
+      "timestamp": 300.0,
+      "event_type": "pass",
+      "team": "Team B",
+      "x": 44.0,
+      "y": 18.0,
+      "end_x": 49.0,
+      "end_y": 21.0,
+      "outcome": "complete",
+      "xt_before": 0.03,
+      "xt_after": 0.035
+    },
+    {
+      "timestamp": 305.0,
+      "event_type": "turnover",
+      "team": "Team B",
+      "x": 49.0,
+      "y": 21.0,
+      "outcome": "lost"
+    }
+  ]
+}
+

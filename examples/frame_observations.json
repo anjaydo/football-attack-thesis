@@ -1,0 +1,30 @@
+{
+  "video_id": "demo-video-001",
+  "frames": [
+    {
+      "frame_index": 250,
+      "timestamp_sec": 10.0,
+      "calibration_confidence": 0.91,
+      "objects": [
+        {
+          "track_id": "player-a-07",
+          "object_type": "player",
+          "confidence": 0.94,
+          "bbox": {"x1": 622, "y1": 310, "x2": 661, "y2": 410},
+          "team": "Team A",
+          "pitch_x": 48.0,
+          "pitch_y": 33.0
+        },
+        {
+          "track_id": "ball-01",
+          "object_type": "ball",
+          "confidence": 0.82,
+          "bbox": {"x1": 670, "y1": 392, "x2": 679, "y2": 401},
+          "pitch_x": 49.2,
+          "pitch_y": 33.4
+        }
+      ]
+    }
+  ]
+}
+

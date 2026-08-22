@@ -1,0 +1,44 @@
+{
+  "attack_id": "demo-effective-001",
+  "team": "Team A",
+  "start_sec": 120.0,
+  "end_sec": 128.5,
+  "events": [
+    {
+      "timestamp": 120.0,
+      "event_type": "pass",
+      "team": "Team A",
+      "x": 50.0,
+      "y": 34.0,
+      "end_x": 72.0,
+      "end_y": 31.0,
+      "outcome": "complete",
+      "xt_before": 0.04,
+      "xt_after": 0.10
+    },
+    {
+      "timestamp": 124.0,
+      "event_type": "carry",
+      "team": "Team A",
+      "x": 72.0,
+      "y": 31.0,
+      "end_x": 91.0,
+      "end_y": 35.0,
+      "outcome": "complete",
+      "xt_before": 0.10,
+      "xt_after": 0.26
+    },
+    {
+      "timestamp": 128.5,
+      "event_type": "shot",
+      "team": "Team A",
+      "x": 93.0,
+      "y": 35.0,
+      "end_x": 105.0,
+      "end_y": 34.0,
+      "outcome": "saved",
+      "xg": 0.42
+    }
+  ]
+}
+
