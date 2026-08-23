@@ -21,10 +21,12 @@ from .agent_tools import EvidenceToolRegistry
 from .benchmarks import build_footpass_role_benchmarks
 from .footpass import (
     FootpassSegmentationConfig,
+    footpass_match_keys,
     footpass_summary,
     load_footpass_events,
     segment_footpass_attacks,
 )
+from .research_evaluation import action_spotting_dataset_report
 from .geometry import PitchProjector
 from .llm import DeterministicEvidenceClient
 from .ml import train_effectiveness_models, train_xg_models
@@ -60,6 +62,7 @@ COMMANDS = {
     "soccernet-export-yolo",
     "train-ball-model",
     "footpass-ingest",
+    "evaluate-footpass-actions",
     "build-annotations",
     "train-xg",
     "train-effectiveness",
@@ -284,10 +287,23 @@ def build_parser() -> argparse.ArgumentParser:
     footpass_parser.add_argument("--source", choices=("oracle", "predicted"), default="oracle")
     footpass_parser.add_argument("--tactical-h5", type=Path)
     footpass_parser.add_argument("--fps", type=float, default=25.0)
+    footpass_parser.add_argument("--min-confidence", type=float, default=0.15)
+    footpass_parser.add_argument("--model-name")
     footpass_parser.add_argument("--max-gap", type=float, default=4.0)
     footpass_parser.add_argument("--max-duration", type=float, default=45.0)
     footpass_parser.add_argument("--min-events", type=int, default=1)
     footpass_parser.add_argument("--output", type=Path)
+
+    footpass_evaluation_parser = subparsers.add_parser(
+        "evaluate-footpass-actions",
+        help="Evaluate predicted FOOTPASS actions with strict match/team/jersey/class matching",
+    )
+    footpass_evaluation_parser.add_argument("ground_truth", type=Path)
+    footpass_evaluation_parser.add_argument("predictions", type=Path)
+    footpass_evaluation_parser.add_argument("--fps", type=float, default=25.0)
+    footpass_evaluation_parser.add_argument("--delta", type=int, default=12)
+    footpass_evaluation_parser.add_argument("--min-confidence", type=float, default=0.15)
+    footpass_evaluation_parser.add_argument("--model-name", default="predicted")
 
     annotation_parser = subparsers.add_parser(
         "build-annotations", help="Create a stratified, unlabeled attack annotation manifest"
@@ -446,6 +462,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             source=args.source,
             tactical_h5=args.tactical_h5,
             fps=args.fps,
+            min_confidence=args.min_confidence,
+            model_name=args.model_name,
         )
         attacks = segment_footpass_attacks(
             events,
@@ -468,6 +486,39 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    elif args.command == "evaluate-footpass-actions":
+        ground_truth_keys = set(footpass_match_keys(args.ground_truth))
+        prediction_keys = set(footpass_match_keys(args.predictions))
+        keys = sorted(ground_truth_keys | prediction_keys)
+        ground_truth = {
+            key: load_footpass_events(
+                args.ground_truth,
+                match_key=key,
+                source="oracle",
+                fps=args.fps,
+            )
+            if key in ground_truth_keys
+            else ()
+            for key in keys
+        }
+        predictions = {
+            key: load_footpass_events(
+                args.predictions,
+                match_key=key,
+                source="predicted",
+                fps=args.fps,
+                min_confidence=args.min_confidence,
+                model_name=args.model_name,
+            )
+            if key in prediction_keys
+            else ()
+            for key in keys
+        }
+        result = action_spotting_dataset_report(
+            ground_truth,
+            predictions,
+            tolerance_frames=args.delta,
+        )
     elif args.command == "build-annotations":
         payload = _load_json(args.input)
         raw_attacks = payload.get("attacks") if isinstance(payload, dict) else None

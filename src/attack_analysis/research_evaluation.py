@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import math
 import random
-from collections import defaultdict
 from statistics import median
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from .models import Event
 
@@ -28,8 +27,9 @@ def action_spotting_report(
     predictions: Sequence[Event],
     *,
     tolerance_frames: int = 12,
+    match_player: bool = True,
 ) -> dict[str, object]:
-    """Greedy one-to-one, class-wise spotting metrics within a frame tolerance."""
+    """Greedy one-to-one spotting metrics using FOOTPASS team/player/action identity."""
     if tolerance_frames < 0:
         raise ValueError("tolerance_frames must be non-negative")
     classes = sorted({event.event_type for event in (*ground_truth, *predictions)})
@@ -48,6 +48,7 @@ def action_spotting_report(
                 for index in remaining
                 if actual[index].frame is not None
                 and actual[index].team == prediction.team
+                and (not match_player or actual[index].jersey == prediction.jersey)
                 and abs(actual[index].frame - prediction.frame) <= tolerance_frames
             ]
             if not candidates:
@@ -61,11 +62,64 @@ def action_spotting_report(
         total_actual += len(actual)
     return {
         "tolerance_frames": tolerance_frames,
+        "match_player": match_player,
         "class_wise": by_class,
         "micro": _prf(total_tp, total_predicted, total_actual),
         "macro_f1": sum(float(item["f1"]) for item in by_class.values()) / len(by_class)
         if by_class
         else 0.0,
+    }
+
+
+def action_spotting_dataset_report(
+    ground_truth_by_match: Mapping[str, Sequence[Event]],
+    predictions_by_match: Mapping[str, Sequence[Event]],
+    *,
+    tolerance_frames: int = 12,
+    match_player: bool = True,
+) -> dict[str, object]:
+    """Aggregate spotting counts per match so events from different games can never match."""
+    match_ids = sorted(set(ground_truth_by_match) | set(predictions_by_match))
+    aggregate: dict[str, dict[str, int]] = {}
+    match_wise: dict[str, dict[str, float | int]] = {}
+    for match_id in match_ids:
+        report = action_spotting_report(
+            ground_truth_by_match.get(match_id, ()),
+            predictions_by_match.get(match_id, ()),
+            tolerance_frames=tolerance_frames,
+            match_player=match_player,
+        )
+        micro = report["micro"]
+        match_wise[match_id] = {
+            "precision": float(micro["precision"]),
+            "recall": float(micro["recall"]),
+            "f1": float(micro["f1"]),
+            "predicted": int(micro["predicted"]),
+            "actual": int(micro["actual"]),
+        }
+        for event_type, metrics in report["class_wise"].items():
+            totals = aggregate.setdefault(
+                event_type, {"true_positive": 0, "predicted": 0, "actual": 0}
+            )
+            for key in totals:
+                totals[key] += int(metrics[key])
+    class_wise = {
+        event_type: _prf(values["true_positive"], values["predicted"], values["actual"])
+        for event_type, values in sorted(aggregate.items())
+    }
+    true_positive = sum(int(item["true_positive"]) for item in class_wise.values())
+    predicted = sum(int(item["predicted"]) for item in class_wise.values())
+    actual = sum(int(item["actual"]) for item in class_wise.values())
+    return {
+        "tolerance_frames": tolerance_frames,
+        "match_player": match_player,
+        "match_count": len(match_ids),
+        "class_wise": class_wise,
+        "micro": _prf(true_positive, predicted, actual),
+        "macro_f1": sum(float(item["f1"]) for item in class_wise.values()) / len(class_wise)
+        if class_wise
+        else 0.0,
+        "match_wise": match_wise,
     }
 
 

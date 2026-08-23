@@ -30,12 +30,13 @@ attack-analysis footpass-ingest `
   --output runs\game_18_H1.oracle.json
 ```
 
-TAAD predictions enriched with the same tactical coordinate contract:
+DST-denoised predictions enriched with the same tactical coordinate contract:
 
 ```powershell
 attack-analysis footpass-ingest `
-  ..\FOOTPASS\playbyplay_PRED\playbyplay_TAAD_val.json game_18_H1 `
+  ..\FOOTPASS\playbyplay_PRED\playbyplay_DST_val.json game_18_H1 `
   --source predicted `
+  --model-name DST --min-confidence 0.15 `
   --tactical-h5 ..\FOOTPASS\data\val_tactical_data.h5 `
   --output runs\game_18_H1.predicted.json
 ```
@@ -43,6 +44,25 @@ attack-analysis footpass-ingest `
 The output contains normalized events, possession attacks, source identifiers and
 shot xG from the geometry fallback. Replace the fallback with a trained xG artifact
 after the leakage-safe model is validated.
+
+Use raw TAAD only as an ablation. On the six validation halves, the official
+strict evaluator at ±12 frames improves from TAAD micro-F1 0.410 to DST 0.719.
+DST produces 1,215 attacks and 66 shot attacks, much closer to oracle (1,360 and
+67) than raw TAAD (5,849 and 304). At a ±1 second tolerance, start/end boundary
+F1 rises from 0.230/0.251 for TAAD to 0.701/0.703 for DST. Reproduce the action
+comparison with:
+
+```powershell
+attack-analysis evaluate-footpass-actions `
+  ..\FOOTPASS\playbyplay_GT\playbyplay_val.json `
+  ..\FOOTPASS\playbyplay_PRED\playbyplay_DST_val.json `
+  --model-name DST --min-confidence 0.15 --delta 12
+```
+
+The demo also exposes a precision-oriented threshold of 0.60. It was selected
+on `game_18` only and evaluated on held-out `game_24`/`game_47`; it raises
+held-out micro-F1 from 0.726 to 0.736, but reduces shot/attack recall, so 0.15
+remains the primary downstream setting.
 
 ## 2. Create the annotation set
 
@@ -110,7 +130,7 @@ or skips `verify_claims`.
 ## Current scientific boundaries
 
 - FOOTPASS tactical enrichment is an oracle coordinate path even when actions are
-  TAAD predictions; report it as predicted-actions/oracle-tracking, not fully video-only.
+  DST/TAAD predictions; report it as predicted-actions/oracle-tracking, not fully video-only.
 - Geometry xG is a transparent fallback, not the final trained xG model.
 - Uploaded arbitrary video must abstain until tracking, calibration and event gates pass.
 - Challenge matches are not used for model selection or threshold tuning.

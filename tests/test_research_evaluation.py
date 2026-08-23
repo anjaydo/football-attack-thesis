@@ -5,6 +5,7 @@ import unittest
 from attack_analysis.models import Event
 from attack_analysis.research_evaluation import (
     action_spotting_report,
+    action_spotting_dataset_report,
     boundary_f1,
     match_bootstrap_interval,
     top_view_error_report,
@@ -21,6 +22,19 @@ class ResearchEvaluationTests(unittest.TestCase):
         report = action_spotting_report(actual, predicted, tolerance_frames=12)
         self.assertEqual(report["class_wise"]["pass"]["true_positive"], 1)
         self.assertEqual(report["class_wise"]["pass"]["precision"], 0.5)
+
+    def test_action_spotting_requires_player_identity(self) -> None:
+        actual = (Event(timestamp=1, frame=25, event_type="pass", team="0", jersey=9),)
+        predicted = (Event(timestamp=1, frame=25, event_type="pass", team="0", jersey=10),)
+        report = action_spotting_report(actual, predicted)
+        self.assertEqual(report["micro"]["true_positive"], 0)
+
+    def test_dataset_report_never_matches_events_across_matches(self) -> None:
+        actual = Event(timestamp=1, frame=25, event_type="pass", team="0", jersey=9)
+        predicted = Event(timestamp=1, frame=25, event_type="pass", team="0", jersey=9)
+        report = action_spotting_dataset_report({"m1": (actual,)}, {"m2": (predicted,)})
+        self.assertEqual(report["micro"]["true_positive"], 0)
+        self.assertEqual(report["match_count"], 2)
 
     def test_boundary_and_projection_metrics(self) -> None:
         report = boundary_f1((10.0, 20.0), (10.5, 25.0), tolerance_seconds=1.0)

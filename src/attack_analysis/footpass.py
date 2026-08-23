@@ -60,6 +60,10 @@ def _read_playbyplay(path: Path) -> dict[str, list[list[object]]]:
     return {str(key): list(value) for key, value in events.items()}
 
 
+def footpass_match_keys(path: Path) -> tuple[str, ...]:
+    return tuple(sorted(_read_playbyplay(path)))
+
+
 def _load_tactical_rows(path: Path, match_key: str) -> Any:
     try:
         import h5py
@@ -103,9 +107,23 @@ def load_footpass_events(
     source: str,
     tactical_h5: Path | None = None,
     fps: float = 25.0,
+    min_confidence: float = 0.0,
+    model_name: str | None = None,
 ) -> tuple[Event, ...]:
     if fps <= 0:
         raise ValueError("fps must be positive")
+    if not 0.0 <= min_confidence <= 1.0:
+        raise ValueError("min_confidence must be between 0 and 1")
+    normalized_model = None
+    if model_name:
+        normalized_model = "".join(
+            character for character in model_name.casefold() if character.isalnum() or character == "_"
+        )
+        if not normalized_model:
+            raise ValueError("model_name must contain at least one letter or number")
+    source_name = f"footpass_{source}"
+    if normalized_model:
+        source_name = f"{source_name}_{normalized_model}"
     groups = _read_playbyplay(playbyplay_path)
     if match_key not in groups:
         raise KeyError(f"{match_key} is not present in {playbyplay_path}")
@@ -120,6 +138,8 @@ def load_footpass_events(
         if action not in FOOTPASS_ACTIONS:
             raise ValueError(f"unknown FOOTPASS action class: {action}")
         confidence = float(raw[4]) if source == "predicted" and len(raw) >= 5 else 1.0
+        if source == "predicted" and confidence < min_confidence:
+            continue
         row = (
             _find_tactical_row(rows, frame_values, frame, team, jersey, action)
             if rows is not None
@@ -155,7 +175,7 @@ def load_footpass_events(
                 jersey=jersey,
                 role=role,
                 confidence=confidence,
-                source=f"footpass_{source}",
+                source=source_name,
                 evidence_id=evidence_id,
             )
         )

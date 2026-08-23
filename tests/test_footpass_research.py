@@ -56,6 +56,34 @@ class FootpassResearchTests(unittest.TestCase):
         self.assertEqual(events[0].confidence, 0.8)
         self.assertIsNone(events[1].xg)
 
+    def test_prediction_confidence_filter_and_model_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pred.json"
+            path.write_text(
+                json.dumps(
+                    {"events": {"game_1_H1": [[25, 0, 9, 2, 0.59], [50, 0, 9, 5, 0.8]]}}
+                ),
+                encoding="utf-8",
+            )
+            events = load_footpass_events(
+                path,
+                match_key="game_1_H1",
+                source="predicted",
+                min_confidence=0.6,
+                model_name="DST",
+            )
+        self.assertEqual([item.event_type for item in events], ["shot"])
+        self.assertEqual(events[0].source, "footpass_predicted_dst")
+
+    def test_rejects_invalid_prediction_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pred.json"
+            path.write_text(json.dumps({"events": {"game_1_H1": []}}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "min_confidence"):
+                load_footpass_events(
+                    path, match_key="game_1_H1", source="predicted", min_confidence=1.1
+                )
+
     def test_segments_team_change_shot_and_gap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "gt.json"

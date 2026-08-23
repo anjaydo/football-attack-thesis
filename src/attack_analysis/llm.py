@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from .agent_tools import EvidenceToolRegistry, verify_verdict
+from .env import load_project_environment
 from .research import (
     EvidenceBundle,
     EvidenceClaim,
@@ -15,6 +17,39 @@ from .research import (
 
 
 PROMPT_VERSION = "attack-verdict-v1"
+
+
+def describe_openai_error(error: Exception) -> str:
+    """Return an actionable message without exposing request or credential details."""
+    status_code = getattr(error, "status_code", None)
+    error_code = getattr(error, "code", None)
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        error_code = error_code or body.get("code")
+        nested = body.get("error")
+        if isinstance(nested, dict):
+            error_code = error_code or nested.get("code")
+
+    normalized = f"{error_code or ''} {error}".lower()
+    if status_code == 429 and "insufficient_quota" in normalized:
+        return (
+            "OpenAI accepted the API key, but this API project has no available quota. "
+            "Add API credits or raise the project usage limit, then retry after billing updates."
+        )
+    if status_code == 429:
+        return "OpenAI rate-limited this request. Wait briefly and try again."
+    if status_code == 401:
+        return "OpenAI rejected the API key. Check OPENAI_API_KEY and restart the demo."
+    if status_code == 403:
+        return "This OpenAI API project does not have permission to use the selected model."
+    if status_code == 404:
+        return "The selected OpenAI model was not found or is not available to this API project."
+    if isinstance(error, ValueError):
+        return (
+            "OpenAI returned a verdict that did not satisfy the evidence contract, even after an automatic retry. "
+            "The deterministic baseline is shown instead."
+        )
+    return f"OpenAI evaluation failed: {type(error).__name__}. Check the Streamlit terminal for details."
 
 
 def load_project_skill_instructions(project_root: Path) -> str:
@@ -116,7 +151,10 @@ class OpenAIResponsesClient(LLMClient):
         project_root: Path,
         api_key: str | None = None,
         max_tool_rounds: int = 6,
+        max_contract_retries: int = 1,
+        response_language: str = "English",
     ) -> None:
+        load_project_environment(project_root)
         try:
             from openai import OpenAI
         except ImportError as error:  # pragma: no cover - optional dependency
@@ -125,15 +163,48 @@ class OpenAIResponsesClient(LLMClient):
         self.model = model
         self.instructions = load_project_skill_instructions(project_root)
         self.max_tool_rounds = max_tool_rounds
+        self.max_contract_retries = max_contract_retries
+        self.response_language = response_language
 
     def evaluate(self, bundle: EvidenceBundle, tools: EvidenceToolRegistry) -> EvaluationVerdict:
         if not bundle.downstream_ready:
             return insufficient_evidence_verdict(bundle.attack.attack_id, bundle.limitations, model=self.model)
+        max_retries = max(0, getattr(self, "max_contract_retries", 1))
+        for retry_count in range(max_retries + 1):
+            try:
+                verdict = self._evaluate_once(bundle, tools)
+            except ValueError as error:
+                if retry_count >= max_retries:
+                    raise
+                tools.trace.append(
+                    {
+                        "event": "contract_retry",
+                        "attempt": retry_count + 1,
+                        "error_type": type(error).__name__,
+                    }
+                )
+                continue
+            return replace(
+                verdict,
+                usage={**verdict.usage, "contract_retries": retry_count},
+            )
+        raise AssertionError("unreachable")
+
+    def _evaluate_once(self, bundle: EvidenceBundle, tools: EvidenceToolRegistry) -> EvaluationVerdict:
+        response_language = getattr(self, "response_language", "English")
+        response_instructions = (
+            self.instructions
+            + "\n\n# Output language\n"
+            + f"All user-visible claim text and limitations MUST be written in {response_language}. "
+            + "Keep only metric names, action labels, identifiers and source names in their original form."
+        )
         request: dict[str, Any] = {
             "model": self.model,
-            "instructions": self.instructions,
+            "instructions": response_instructions,
             "input": (
-                "Evaluate this attack only from the structured bundle. Call verify_claims before the final answer.\n"
+                "Evaluate this attack only from the structured bundle. Call verify_claims before the final answer. "
+                "After verify_claims succeeds, copy the verified claims into the final JSON without changing their "
+                f"text or evidence_ids. Write claims and limitations in {response_language}.\n"
                 + json.dumps(bundle.to_dict(), ensure_ascii=False)
             ),
             "tools": tools.schemas(),
@@ -170,7 +241,7 @@ class OpenAIResponsesClient(LLMClient):
             ]
             response = self.client.responses.create(
                 model=self.model,
-                instructions=self.instructions,
+                instructions=response_instructions,
                 input=response_items + tool_outputs,
                 tools=tools.schemas(),
                 text=request["text"],
@@ -202,6 +273,12 @@ class OpenAIResponsesClient(LLMClient):
         last_verification = verification_calls[-1]
         if not last_verification["result"].get("valid"):
             raise ValueError("LLM returned claims after a failed verification")
-        if last_verification["arguments"].get("claims") != [claim.to_dict() for claim in verdict.claims]:
-            raise ValueError("final claims differ from the claims passed to verify_claims")
-        return verdict
+        final_claims = [claim.to_dict() for claim in verdict.claims]
+        if last_verification["arguments"].get("claims") != final_claims:
+            final_verification = tools.call(
+                "verify_claims",
+                {"attack_id": verdict.attack_id, "claims": final_claims},
+            )
+            if not final_verification.get("valid"):
+                raise ValueError("final claims failed post-generation verification")
+        return replace(verdict, tool_trace=tuple(dict(item) for item in tools.trace))
