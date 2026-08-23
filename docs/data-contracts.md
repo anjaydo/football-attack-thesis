@@ -40,9 +40,12 @@ Sau segmentation, mỗi `AttackSequence` được đưa thẳng vào metric/scor
 |---|---|
 | Video metadata | Đã có, cần OpenCV khi chạy video thật |
 | Frame observation schema | Đã có và validate được |
-| Detector/tracker/calibration | Chưa tích hợp |
-| Event extraction từ tracks | Chưa tích hợp |
+| Detector/tracker | Đã có MVP YOLO26 Pose + Detect, BoT-SORT + ByteTrack |
+| Static calibration | Đã có homography bốn điểm cho camera cố định |
+| Dynamic broadcast calibration | Chưa tích hợp |
+| Event extraction từ tracks | Có baseline possession/carry/pass/turnover |
 | Attack segmentation | Đã có baseline |
 | Metrics và effectiveness score | Đã có baseline |
+| Observation quality gate | Đã có `quality-report` |
+| Scene-cut handling | Reset speed/team và chặn event transition qua cut |
 | LLM grounded explanation | Chưa tích hợp; hiện dùng template |
-

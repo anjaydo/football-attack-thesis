@@ -1,0 +1,6 @@
+{
+  "description": "Replace image_points with four pitch landmarks visible in a fixed-camera clip.",
+  "image_points": [[200, 700], [1720, 700], [1300, 250], [620, 250]],
+  "pitch_points": [[0, 68], [105, 68], [105, 0], [0, 0]]
+}
+

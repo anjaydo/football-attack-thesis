@@ -28,6 +28,7 @@ class Event:
     end_y: float | None = None
     outcome: str | None = None
     xg: float | None = None
+    xg_source: str | None = None
     xt_before: float | None = None
     xt_after: float | None = None
 
@@ -43,6 +44,7 @@ class Event:
             end_y=_optional_number(data, "end_y"),
             outcome=(str(data["outcome"]).lower() if data.get("outcome") else None),
             xg=_optional_number(data, "xg"),
+            xg_source=(str(data["xg_source"]) if data.get("xg_source") else None),
             xt_before=_optional_number(data, "xt_before"),
             xt_after=_optional_number(data, "xt_after"),
         )
@@ -60,6 +62,8 @@ class Event:
                 raise ValueError(f"{key} must be between 0 and {upper}")
         if self.xg is not None and not 0.0 <= self.xg <= 1.0:
             raise ValueError("xg must be between 0 and 1")
+        if self.xg_source is not None and self.xg is None:
+            raise ValueError("xg_source requires xg")
 
     def to_dict(self) -> dict[str, object]:
         return {key: value for key, value in asdict(self).items() if value is not None}

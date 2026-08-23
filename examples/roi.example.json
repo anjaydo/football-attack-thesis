@@ -1,0 +1,5 @@
+{
+  "description": "Replace polygon points with the visible pitch boundary in image pixels.",
+  "polygon": [[100, 700], [1820, 700], [1380, 220], [540, 220]]
+}
+

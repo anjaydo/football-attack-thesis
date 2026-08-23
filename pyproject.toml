@@ -7,9 +7,12 @@ name = "football-attack-analysis"
 version = "0.1.0"
 description = "Research baseline for evaluating football attacking sequences"
 requires-python = ">=3.10"
+dependencies = ["numpy"]
 
 [project.optional-dependencies]
 video = ["opencv-python"]
+vision = ["opencv-python", "ultralytics"]
+soccernet = ["SoccerNet>=0.1.62"]
 
 [project.scripts]
 attack-analysis = "attack_analysis.cli:main"
