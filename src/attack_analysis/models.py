@@ -31,6 +31,13 @@ class Event:
     xg_source: str | None = None
     xt_before: float | None = None
     xt_after: float | None = None
+    frame: int | None = None
+    player_id: str | None = None
+    jersey: int | None = None
+    role: str | None = None
+    confidence: float = 1.0
+    source: str = "structured"
+    evidence_id: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Event":
@@ -47,6 +54,13 @@ class Event:
             xg_source=(str(data["xg_source"]) if data.get("xg_source") else None),
             xt_before=_optional_number(data, "xt_before"),
             xt_after=_optional_number(data, "xt_after"),
+            frame=(int(data["frame"]) if data.get("frame") is not None else None),
+            player_id=(str(data["player_id"]) if data.get("player_id") is not None else None),
+            jersey=(int(data["jersey"]) if data.get("jersey") is not None else None),
+            role=(str(data["role"]) if data.get("role") is not None else None),
+            confidence=float(data.get("confidence", 1.0)),
+            source=str(data.get("source", "structured")),
+            evidence_id=(str(data["evidence_id"]) if data.get("evidence_id") else None),
         )
         event.validate()
         return event
@@ -64,6 +78,14 @@ class Event:
             raise ValueError("xg must be between 0 and 1")
         if self.xg_source is not None and self.xg is None:
             raise ValueError("xg_source requires xg")
+        if self.frame is not None and self.frame < 0:
+            raise ValueError("frame must be non-negative")
+        if self.jersey is not None and self.jersey < 0:
+            raise ValueError("jersey must be non-negative")
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("confidence must be between 0 and 1")
+        if not self.source:
+            raise ValueError("source must not be empty")
 
     def to_dict(self) -> dict[str, object]:
         return {key: value for key, value in asdict(self).items() if value is not None}
@@ -76,6 +98,11 @@ class AttackSequence:
     start_sec: float
     end_sec: float
     events: tuple[Event, ...]
+    match_id: str | None = None
+    start_frame: int | None = None
+    end_frame: int | None = None
+    termination_reason: str | None = None
+    source: str = "structured"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AttackSequence":
@@ -85,6 +112,13 @@ class AttackSequence:
             start_sec=float(data["start_sec"]),
             end_sec=float(data["end_sec"]),
             events=tuple(Event.from_dict(item) for item in data["events"]),
+            match_id=(str(data["match_id"]) if data.get("match_id") else None),
+            start_frame=(int(data["start_frame"]) if data.get("start_frame") is not None else None),
+            end_frame=(int(data["end_frame"]) if data.get("end_frame") is not None else None),
+            termination_reason=(
+                str(data["termination_reason"]) if data.get("termination_reason") else None
+            ),
+            source=str(data.get("source", "structured")),
         )
         sequence.validate()
         return sequence
@@ -101,12 +135,29 @@ class AttackSequence:
             raise ValueError("events must be ordered by timestamp")
         if timestamps[0] < self.start_sec or timestamps[-1] > self.end_sec:
             raise ValueError("event timestamps must fall within the attack interval")
+        if (self.start_frame is None) != (self.end_frame is None):
+            raise ValueError("start_frame and end_frame must be provided together")
+        if self.start_frame is not None and self.end_frame < self.start_frame:
+            raise ValueError("end_frame must be greater than or equal to start_frame")
+        if not self.source:
+            raise ValueError("source must not be empty")
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "attack_id": self.attack_id,
             "team": self.team,
             "start_sec": self.start_sec,
             "end_sec": self.end_sec,
             "events": [event.to_dict() for event in self.events],
         }
+        for key in (
+            "match_id",
+            "start_frame",
+            "end_frame",
+            "termination_reason",
+            "source",
+        ):
+            value = getattr(self, key)
+            if value is not None:
+                result[key] = value
+        return result

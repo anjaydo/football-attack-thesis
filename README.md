@@ -31,6 +31,11 @@ Prototype đã có:
 - các chỉ số progression, final-third/box entry, shot, xG và xT;
 - rule-based baseline cho điểm 0-100 và kết luận;
 - explanation deterministic chỉ dựa trên dữ liệu đã tính;
+- FOOTPASS oracle/predicted adapters, possession segmentation và attack feature contract;
+- stratified annotation manifest cho nhãn ba mức, score và confidence;
+- leakage-safe xG/effectiveness trainers với split theo match;
+- frozen role benchmark store, grounded LLM tools và claim verification;
+- Streamlit demo cho FOOTPASS, annotation và exploratory upload;
 - dữ liệu ví dụ và unit tests.
 
 Rule-based score chỉ là baseline kỹ thuật. Trong luận văn, nó sẽ được thay/thêm
@@ -130,3 +135,4 @@ Tài liệu:
 - `docs/implementation-status.md`: ma trận chức năng, mức kiểm thử và phần còn thiếu.
 - `docs/yolo-field-preview-analysis.md`: phép thử YOLO + field geometry trên SoccerNet.
 - `docs/ball-accuracy-plan.md`: benchmark, dataset, lệnh train GPU và quality gate cho bóng.
+- `docs/research-pipeline.md`: luồng FOOTPASS oracle/predicted, annotation, ML, LLM tools và demo.

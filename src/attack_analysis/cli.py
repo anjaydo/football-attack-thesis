@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -14,11 +15,24 @@ from .detection_evaluation import (
 )
 from .environment import environment_report
 from .field_geometry import FieldLineConfig, analyze_field_image
+from .annotations import build_annotation_manifest, stratified_annotation_sample
+from .attack_features import build_attack_features
+from .agent_tools import EvidenceToolRegistry
+from .benchmarks import build_footpass_role_benchmarks
+from .footpass import (
+    FootpassSegmentationConfig,
+    footpass_summary,
+    load_footpass_events,
+    segment_footpass_attacks,
+)
 from .geometry import PitchProjector
+from .llm import DeterministicEvidenceClient
+from .ml import train_effectiveness_models, train_xg_models
 from .models import AttackSequence, Event
 from .pipeline import run_video_pipeline
 from .quality import analyze_observation_quality, read_observations_jsonl
 from .roi import PolygonROI
+from .research import EvidenceBundle
 from .scoring import evaluate_attack
 from .segmentation import SegmentationConfig, segment_attacks
 from .soccernet import analyze_gamestate_sequence, download_gamestate_sequence
@@ -36,6 +50,7 @@ COMMANDS = {
     "quality-report",
     "infer-events",
     "run-pipeline",
+    "analyze-clip",
     "doctor",
     "soccernet-download",
     "soccernet-analyze",
@@ -44,6 +59,13 @@ COMMANDS = {
     "benchmark-ball",
     "soccernet-export-yolo",
     "train-ball-model",
+    "footpass-ingest",
+    "build-annotations",
+    "train-xg",
+    "train-effectiveness",
+    "evaluate-evidence",
+    "serve-demo",
+    "build-footpass-benchmarks",
 }
 
 
@@ -139,6 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pipeline_parser = subparsers.add_parser(
         "run-pipeline",
+        aliases=("analyze-clip",),
         help="Run video annotation, quality gate and optional event/attack analysis",
     )
     pipeline_parser.add_argument("input", type=Path)
@@ -251,6 +274,64 @@ def build_parser() -> argparse.ArgumentParser:
     ball_training_parser.add_argument("--device", default="cpu")
     ball_training_parser.add_argument("--workers", type=int, default=0)
     ball_training_parser.add_argument("--name", default="soccernet-ball")
+
+    footpass_parser = subparsers.add_parser(
+        "footpass-ingest",
+        help="Normalize one FOOTPASS half, enrich tactical coordinates and segment attacks",
+    )
+    footpass_parser.add_argument("playbyplay", type=Path)
+    footpass_parser.add_argument("match_key")
+    footpass_parser.add_argument("--source", choices=("oracle", "predicted"), default="oracle")
+    footpass_parser.add_argument("--tactical-h5", type=Path)
+    footpass_parser.add_argument("--fps", type=float, default=25.0)
+    footpass_parser.add_argument("--max-gap", type=float, default=4.0)
+    footpass_parser.add_argument("--max-duration", type=float, default=45.0)
+    footpass_parser.add_argument("--min-events", type=int, default=1)
+    footpass_parser.add_argument("--output", type=Path)
+
+    annotation_parser = subparsers.add_parser(
+        "build-annotations", help="Create a stratified, unlabeled attack annotation manifest"
+    )
+    annotation_parser.add_argument("input", type=Path, help="JSON containing an attacks array")
+    annotation_parser.add_argument("output", type=Path)
+    annotation_parser.add_argument("--sample-size", type=int, default=300)
+    annotation_parser.add_argument("--seed", type=int, default=42)
+
+    xg_parser = subparsers.add_parser(
+        "train-xg", help="Train leakage-safe xG candidates with match-grouped splits"
+    )
+    xg_parser.add_argument("input", type=Path)
+    xg_parser.add_argument("output", type=Path)
+    xg_parser.add_argument("--match-column", default="match_id")
+    xg_parser.add_argument("--target", default="goal")
+    xg_parser.add_argument("--seed", type=int, default=42)
+
+    effectiveness_parser = subparsers.add_parser(
+        "train-effectiveness", help="Train effectiveness baselines with match-grouped splits"
+    )
+    effectiveness_parser.add_argument("input", type=Path)
+    effectiveness_parser.add_argument("output", type=Path)
+    effectiveness_parser.add_argument("--seed", type=int, default=42)
+
+    evidence_parser = subparsers.add_parser(
+        "evaluate-evidence", help="Create evidence and run the offline grounded-verdict baseline"
+    )
+    evidence_parser.add_argument("input", type=Path, help="AttackSequence JSON")
+    evidence_parser.add_argument("--events-ready", action="store_true")
+    evidence_parser.add_argument("--tracking-ready", action="store_true")
+    evidence_parser.add_argument("--calibration-ready", action="store_true")
+
+    demo_parser = subparsers.add_parser("serve-demo", help="Launch the local Streamlit thesis demo")
+    demo_parser.add_argument("--port", type=int, default=8501)
+
+    benchmark_parser = subparsers.add_parser(
+        "build-footpass-benchmarks", help="Build a frozen per-90 role benchmark snapshot from tactical HDF5"
+    )
+    benchmark_parser.add_argument("tactical_h5", type=Path)
+    benchmark_parser.add_argument("output", type=Path)
+    benchmark_parser.add_argument("--fps", type=float, default=25.0)
+    benchmark_parser.add_argument("--season", default="2023-24")
+    benchmark_parser.add_argument("--snapshot-date")
     return parser
 
 
@@ -358,6 +439,90 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.workers,
             args.name,
         )
+    elif args.command == "footpass-ingest":
+        events = load_footpass_events(
+            args.playbyplay,
+            match_key=args.match_key,
+            source=args.source,
+            tactical_h5=args.tactical_h5,
+            fps=args.fps,
+        )
+        attacks = segment_footpass_attacks(
+            events,
+            match_id=args.match_key,
+            config=FootpassSegmentationConfig(
+                fps=args.fps,
+                max_gap_sec=args.max_gap,
+                max_duration_sec=args.max_duration,
+                min_events=args.min_events,
+            ),
+        )
+        result = {
+            "schema_version": "1.0",
+            "source": args.source,
+            "match_key": args.match_key,
+            "summary": footpass_summary(events, attacks),
+            "events": [item.to_dict() for item in events],
+            "attacks": [item.to_dict() for item in attacks],
+        }
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    elif args.command == "build-annotations":
+        payload = _load_json(args.input)
+        raw_attacks = payload.get("attacks") if isinstance(payload, dict) else None
+        if not isinstance(raw_attacks, list):
+            raise ValueError("annotation input must contain an attacks array")
+        attacks = tuple(AttackSequence.from_dict(item) for item in raw_attacks)
+        sampled = stratified_annotation_sample(attacks, sample_size=args.sample_size, seed=args.seed)
+        result = build_annotation_manifest(sampled)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    elif args.command == "train-xg":
+        result = train_xg_models(
+            args.input,
+            args.output,
+            match_column=args.match_column,
+            target=args.target,
+            seed=args.seed,
+        )
+    elif args.command == "train-effectiveness":
+        result = train_effectiveness_models(args.input, args.output, seed=args.seed)
+    elif args.command == "evaluate-evidence":
+        sequence = AttackSequence.from_dict(_load_json(args.input))
+        features = build_attack_features(sequence)
+        quality_gates = {
+            "events": args.events_ready,
+            "tracking": args.tracking_ready,
+            "calibration": args.calibration_ready,
+        }
+        failed = tuple(f"quality gate failed: {name}" for name, passed in quality_gates.items() if not passed)
+        bundle = EvidenceBundle(
+            attack=features,
+            quality_gates=quality_gates,
+            quality_metrics={},
+            source_ids=(sequence.source,),
+            limitations=failed,
+        )
+        registry = EvidenceToolRegistry({sequence.attack_id: bundle})
+        verdict = DeterministicEvidenceClient().evaluate(bundle, registry)
+        result = {"bundle": bundle.to_dict(), "verdict": verdict.to_dict()}
+    elif args.command == "serve-demo":
+        app_path = Path(__file__).resolve().parents[2] / "app" / "streamlit_app.py"
+        completed = subprocess.run(
+            [sys.executable, "-m", "streamlit", "run", str(app_path), "--server.port", str(args.port)],
+            check=False,
+        )
+        result = {"exit_code": completed.returncode, "app": str(app_path)}
+    elif args.command == "build-footpass-benchmarks":
+        records = build_footpass_role_benchmarks(
+            args.tactical_h5,
+            args.output,
+            fps=args.fps,
+            season=args.season,
+            snapshot_date=args.snapshot_date,
+        )
+        result = {"output": str(args.output), "record_count": len(records)}
     elif args.command == "analyze-events":
         result = _analyze_event_stream(args.input, args.max_gap, args.min_events)
     elif args.command == "video-info":
@@ -392,7 +557,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 json.dumps(result, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-    elif args.command == "run-pipeline":
+    elif args.command in {"run-pipeline", "analyze-clip"}:
         projector = PitchProjector.from_json(args.calibration) if args.calibration else None
         roi = PolygonROI.from_json(args.roi) if args.roi else None
         result = run_video_pipeline(
