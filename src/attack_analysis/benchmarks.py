@@ -5,11 +5,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from .research import BenchmarkRecord
-from .footpass import FOOTPASS_ACTIONS, FOOTPASS_ROLES
-from .models import PITCH_LENGTH, PITCH_WIDTH
+from .footpass import FOOTPASS_ACTIONS, FOOTPASS_ROLES, normalize_footpass_position
 from .xg import heuristic_xg
 
 
@@ -149,11 +148,8 @@ def build_footpass_role_benchmarks(
                 for shot_row in player_rows[player_rows[:, 13] == 5]:
                     team = int(shot_row[2])
                     raw_x, raw_y = float(shot_row[5]), float(shot_row[6])
-                    x = raw_x * PITCH_LENGTH if team == 1 else (1.0 - raw_x) * PITCH_LENGTH
-                    y = raw_y * PITCH_WIDTH
-                    aggregates[key]["xg"] += heuristic_xg(
-                        (min(PITCH_LENGTH, max(0.0, x)), min(PITCH_WIDTH, max(0.0, y)))
-                    )
+                    x, y = normalize_footpass_position(raw_x, raw_y, team)
+                    aggregates[key]["xg"] += heuristic_xg((x, y))
 
     raw_records: list[tuple[tuple[str, int, int], str, float]] = []
     for key, values in aggregates.items():
@@ -192,3 +188,41 @@ def build_footpass_role_benchmarks(
         encoding="utf-8",
     )
     return tuple(records)
+
+
+def write_historical_snapshot(
+    records: Iterable[Mapping[str, object]],
+    output_path: Path,
+    *,
+    snapshot_date: str,
+    default_season: str,
+    default_source_url: str,
+) -> tuple[BenchmarkRecord, ...]:
+    """Persist a versioned frozen stats snapshot. Live scraped numbers are not used."""
+
+    date.fromisoformat(snapshot_date)
+    if not default_season.strip() or not default_source_url.strip():
+        raise ValueError("season and source_url must not be empty")
+    written: list[BenchmarkRecord] = []
+    for index, raw in enumerate(records):
+        record = BenchmarkRecord(
+            benchmark_id=str(raw.get("benchmark_id") or f"snapshot:{snapshot_date}:{index}"),
+            role=str(raw["role"]),
+            metric=str(raw["metric"]),
+            value_per90=float(raw["value_per90"]),
+            percentile=float(raw.get("percentile", 50.0)),
+            season=str(raw.get("season") or default_season),
+            sample_size=int(raw["sample_size"]),
+            source_url=str(raw.get("source_url") or default_source_url),
+            snapshot_date=str(raw.get("snapshot_date") or snapshot_date),
+            player_name=(str(raw["player_name"]) if raw.get("player_name") else None),
+            team_name=(str(raw["team_name"]) if raw.get("team_name") else None),
+        )
+        record.validate()
+        written.append(record)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        "".join(json.dumps(item.to_dict(), ensure_ascii=False) + "\n" for item in written),
+        encoding="utf-8",
+    )
+    return tuple(written)

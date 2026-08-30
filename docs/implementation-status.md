@@ -6,6 +6,11 @@ Ba mức xác minh được dùng trong tài liệu này:
 - **Integration-tested**: luồng nhiều module đã chạy bằng backend YOLO/OpenCV giả;
 - **Real-video verified**: đã chạy với model weights và clip bóng đá thật.
 
+Release hiện là **`research_only`**. Unit/integration/real-data invariants không
+thay thế human ground truth: 12 trận chưa gán nhãn xong, temporal/action/vision
+models chưa qua development gates và frozen test chưa được mở. Vì vậy các con số
+oracle-assisted hiện tại chỉ là audit hạ tầng, không phải accuracy claim.
+
 ## Ma trận chức năng
 
 ### SoccerNet GSR ingestion
@@ -35,18 +40,42 @@ Ba mức xác minh được dùng trong tài liệu này:
 | Speed `px/s` | Hoàn thành | Unit + integration + real video | Có camera motion, chỉ là image-space diagnostic |
 | Static homography | Hoàn thành | Unit | Cho camera cố định |
 | Speed `km/h` | Hoàn thành code | Unit | Chỉ đúng khi calibration đúng |
-| Dynamic broadcast calibration | Chưa có | Chưa test | Cần SoccerNet-GSR/per-frame homography |
+| FOOTPASS-assisted dynamic calibration | Hoàn thành | Unit + real video | Per-frame ROI↔tactical homography, holdout median/P90 gate |
+| Video-only dynamic calibration | Chưa có | Chưa test | Cần semantic pitch landmarks/checkpoint SoccerNet calibration |
 | Observation quality report | Hoàn thành | Unit + CLI | Pass/warn/fail và warning codes |
-| Possession inference | Hoàn thành baseline | Unit | Nearest calibrated player-to-ball |
+| Possession inference | Deterministic v2 baseline | Unit | Contested touch không đổi owner; learned model chưa train |
 | Carry/pass/turnover | Hoàn thành baseline | Unit + CLI | Có physical transfer gate |
-| Shot candidate | Hoàn thành baseline | Unit | Bảo thủ, dựa ball trajectory |
-| Geometry-only xG | Hoàn thành baseline | Unit | Nguồn `heuristic_geometry_v1` |
-| Attack segmentation | Hoàn thành baseline | Unit + CLI | Team change/terminal/gap |
-| Effectiveness scoring | Hoàn thành baseline | Unit + CLI | Rule-based, chưa học từ expert labels |
+| Shot candidate | Hoàn thành baseline | Unit | `shot_candidate` chưa xác minh; không terminal/xG |
+| Geometry-only xG | Legacy ablation | Unit | Không được gắn vào Attack-v2 output |
+| xG-v2 | Hạ tầng + trainer hoàn thành | Unit + StatsBomb run | Chưa có FOOTPASS human-domain validation |
+| Attack-v2 decoder | Hoàn thành deterministic baseline | Unit + real FOOTPASS audit | Strict terminal; chưa human-GT accuracy |
+| TCN/semi-Markov | Hạ tầng hoàn thành | Unit + Torch smoke | `infrastructure_untrained` |
+| Effectiveness scoring | Legacy bị khóa | Unit | Không categorical verdict trước ≥300 confirmed labels + gates |
+| Sequence evaluation | Hoàn thành | Unit | Hungarian, tIoU .25/.5/.75, 2k match bootstrap |
+| Tracking evaluation | Hoàn thành | Unit | AP50-compatible, IDF1, HOTA, team/jersey, ball, GS-HOTA-style |
 | One-command orchestration | Hoàn thành | Integration backend giả | `run-pipeline` + manifest |
-| LLM grounded explanation | Chưa có | Chưa test | Hiện dùng deterministic template |
+| LLM grounded explanation | Legacy-only | Unit | Không được gọi cho censored/non-attack v2 |
 | SoccerNet GSR sequence | Hoàn thành | Real-data verified | `SNGS-033`, 750 frame + GSR labels v1.3 |
 | Real YOLO inference | Đã xác minh preview | Real video | 50 frame ở 1920x1080, inference size 1280, CPU |
+
+## FOOTPASS calibrated-window verification lịch sử (stale)
+
+Các artifact dưới đây dùng pipeline/window V1 và geometry/cache cũ; chúng đã bị
+đánh dấu stale, không còn là kết quả release. Lịch sử đã chạy trên
+`D:\videos\game_18.mp4`, giữ timestamp/frame toàn trận và chỉ
+suy luận YOLO trong cửa sổ được chọn:
+
+- attack `game_18_H1:attack-0001`, frame 39–193: calibration coverage 100%,
+  median/P90 holdout error 0.222/0.732 m, player speed P95 31.2 km/h;
+- attack có shot `game_18_H1:attack-0013`, frame 2492–2665: calibration coverage
+  81.0%, median/P90 0.194/1.179 m và trained xG 0.010;
+- video overlay được chuyển sang H.264 và phát trong Chromium (`readyState=4`);
+- CV-only event inference abstain đúng vì ball tracking coverage lần lượt chỉ
+  6.8% và 2.7%; event stream chính dùng FOOTPASS oracle/DST được báo nguồn riêng.
+
+Kết quả lịch sử này là **oracle/assisted calibration** vì correspondence lấy từ
+tactical HDF5. Không được báo cáo nó như chất lượng calibration video-only hoặc
+Attack-v2. Audit mới nằm ở `runs/verification-v2` và mang content provenance.
 
 ## Điều kiện hoàn thành milestone video đầu tiên
 

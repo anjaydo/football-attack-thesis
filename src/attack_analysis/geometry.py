@@ -3,12 +3,20 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Protocol, Sequence
 
 import numpy as np
 
 
 Point = tuple[float, float]
+
+
+class FramePitchProjector(Protocol):
+    """A calibration provider whose homography can change with the video frame."""
+
+    def for_frame(self, frame_index: int) -> "PitchProjector | None": ...
+
+    def confidence_for_frame(self, frame_index: int) -> float | None: ...
 
 
 def compute_homography(source: Sequence[Point], destination: Sequence[Point]) -> np.ndarray:
@@ -60,3 +68,28 @@ class PitchProjector:
             raise ValueError("point projects to infinity")
         return float(vector[0] / vector[2]), float(vector[1] / vector[2])
 
+
+Projector = PitchProjector | FramePitchProjector
+
+
+def projector_for_frame(
+    projector: Projector | None,
+    frame_index: int,
+) -> PitchProjector | None:
+    if projector is None:
+        return None
+    resolver = getattr(projector, "for_frame", None)
+    return resolver(frame_index) if callable(resolver) else projector
+
+
+def projector_confidence(
+    projector: Projector | None,
+    frame_index: int,
+) -> float | None:
+    if projector is None:
+        return None
+    resolver = getattr(projector, "confidence_for_frame", None)
+    if callable(resolver):
+        value = resolver(frame_index)
+        return None if value is None else min(1.0, max(0.0, float(value)))
+    return 1.0

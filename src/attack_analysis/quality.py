@@ -31,11 +31,20 @@ class ObservationQualityReport:
     unique_ball_tracks: int
     average_player_track_length_frames: float
     average_ball_track_length_frames: float
+    player_track_continuity: float
+    ball_track_continuity: float
+    player_single_frame_track_ratio: float
+    ball_single_frame_track_ratio: float
+    player_track_births_per_100_frames: float
+    ball_track_births_per_100_frames: float
     keypoint_coverage: float
     team_assignment_coverage: float
+    team_track_consistency: float
     team_a_detections: int
     team_b_detections: int
     calibrated_position_coverage: float
+    calibrated_player_coverage: float
+    calibrated_ball_coverage: float
     field_geometry_frame_coverage: float
     average_field_line_segments: float
     average_field_intersections: float
@@ -74,6 +83,56 @@ def _percentile(values: list[float], percentile: float) -> float | None:
     upper = min(lower + 1, len(ordered) - 1)
     fraction = position - lower
     return round(ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction, 3)
+
+
+def _track_diagnostics(
+    frames: tuple[FrameObservation, ...],
+    object_types: frozenset[str],
+) -> tuple[float, float, float]:
+    observations: dict[str, list[int]] = {}
+    for frame in frames:
+        for item in frame.objects:
+            if item.object_type in object_types and item.track_id is not None:
+                observations.setdefault(item.track_id, []).append(frame.frame_index)
+    if not observations:
+        return 0.0, 0.0, 0.0
+    continuity = []
+    for indices in observations.values():
+        span = max(indices) - min(indices) + 1
+        continuity.append(len(set(indices)) / span)
+    single_frame = sum(len(set(indices)) == 1 for indices in observations.values())
+    births_per_100 = 100.0 * len(observations) / max(1, len(frames))
+    return (
+        round(sum(continuity) / len(continuity), 4),
+        round(single_frame / len(observations), 4),
+        round(births_per_100, 3),
+    )
+
+
+def track_birth_limit_per_100_frames(frame_count: int) -> float:
+    """Allow one initial track in a short clip without accepting ID churn."""
+
+    return round(max(20.0, 100.0 / max(1, frame_count)), 3)
+
+
+def _team_track_consistency(frames: tuple[FrameObservation, ...]) -> float:
+    track_teams: dict[str, list[str]] = {}
+    for frame in frames:
+        for item in frame.objects:
+            if (
+                item.object_type in {"player", "goalkeeper"}
+                and item.track_id is not None
+                and item.team in {"team_a", "team_b"}
+            ):
+                track_teams.setdefault(item.track_id, []).append(item.team)
+    if not track_teams:
+        return 0.0
+    consistent, total = 0, 0
+    for values in track_teams.values():
+        counts = Counter(values)
+        consistent += max(counts.values())
+        total += len(values)
+    return _ratio(consistent, total)
 
 
 def analyze_observation_quality(
@@ -115,6 +174,12 @@ def analyze_observation_quality(
         item.track_id for item in players if item.track_id is not None
     )
     ball_track_lengths = Counter(item.track_id for item in balls if item.track_id is not None)
+    player_track_continuity, player_single_frame_ratio, player_track_births = _track_diagnostics(
+        sequence, frozenset({"player", "goalkeeper"})
+    )
+    ball_track_continuity, ball_single_frame_ratio, ball_track_births = _track_diagnostics(
+        sequence, frozenset({"ball"})
+    )
 
     visible_keypoints = 0
     for player in players:
@@ -129,8 +194,16 @@ def analyze_observation_quality(
     speed_unit = next(iter(speed_units)) if len(speed_units) == 1 else (
         "mixed" if speed_units else "unknown"
     )
-    player_speeds = [item.speed for item in players if item.speed is not None]
-    ball_speeds = [item.speed for item in balls if item.speed is not None]
+    player_speeds = [
+        item.speed
+        for item in players
+        if item.speed is not None and item.speed_unit == "km/h"
+    ]
+    ball_speeds = [
+        item.speed
+        for item in balls
+        if item.speed is not None and item.speed_unit == "km/h"
+    ]
 
     player_frame_coverage = _ratio(frames_with_players, frame_count)
     ball_frame_coverage = _ratio(frames_with_ball, frame_count)
@@ -144,9 +217,18 @@ def analyze_observation_quality(
         team_a_detections + team_b_detections,
         len(players),
     )
+    team_track_consistency = _team_track_consistency(sequence)
     calibrated_coverage = _ratio(
         sum(item.pitch_x is not None and item.pitch_y is not None for item in all_objects),
         len(all_objects),
+    )
+    calibrated_player_coverage = _ratio(
+        sum(item.pitch_x is not None and item.pitch_y is not None for item in players),
+        len(players),
+    )
+    calibrated_ball_coverage = _ratio(
+        sum(item.pitch_x is not None and item.pitch_y is not None for item in balls),
+        len(balls),
     )
     geometry_frames = [frame.field_geometry for frame in sequence if frame.field_geometry]
     field_geometry_coverage = _ratio(len(geometry_frames), frame_count)
@@ -168,8 +250,10 @@ def analyze_observation_quality(
         0.15 * player_frame_coverage
         + 0.15 * min(1.0, average_players / 10.0)
         + 0.25 * ball_frame_coverage
-        + 0.15 * player_tracking
-        + 0.10 * ball_tracking
+        + 0.08 * player_tracking
+        + 0.07 * player_track_continuity
+        + 0.05 * ball_tracking
+        + 0.05 * ball_track_continuity
         + 0.20 * keypoint_coverage
     )
     quality_score = round(quality_score, 1)
@@ -185,16 +269,28 @@ def analyze_observation_quality(
         warnings.append("low_ball_frame_coverage")
     if players and player_tracking < 0.8:
         warnings.append("low_player_tracking_coverage")
+    if players and player_track_continuity < 0.8:
+        warnings.append("low_player_track_continuity")
+    if players and player_single_frame_ratio > 0.2:
+        warnings.append("high_player_track_fragmentation_proxy")
     if balls and ball_tracking < 0.5:
         warnings.append("low_ball_tracking_coverage")
+    if balls and ball_track_continuity < 0.6:
+        warnings.append("low_ball_track_continuity")
+    if balls and ball_single_frame_ratio > 0.3:
+        warnings.append("high_ball_track_fragmentation_proxy")
+    if balls and ball_track_births > track_birth_limit_per_100_frames(frame_count):
+        warnings.append("high_ball_track_birth_rate")
     if players and keypoint_coverage < 0.5:
         warnings.append("low_keypoint_coverage")
     if 0.0 < team_assignment_coverage < 0.7:
         warnings.append("low_team_assignment_coverage")
+    if team_assignment_coverage > 0.0 and team_track_consistency < 0.9:
+        warnings.append("low_team_track_consistency")
 
     player_speed_p95 = _percentile([float(value) for value in player_speeds], 0.95)
     ball_speed_p95 = _percentile([float(value) for value in ball_speeds], 0.95)
-    if speed_unit == "km/h" and player_speed_p95 is not None and player_speed_p95 > 45:
+    if player_speed_p95 is not None and player_speed_p95 > 45:
         warnings.append("implausible_player_speed_p95")
     if scene_cut_ratio > 0.02:
         warnings.append("high_scene_cut_rate")
@@ -234,11 +330,20 @@ def analyze_observation_quality(
             if ball_track_lengths
             else 0.0
         ),
+        player_track_continuity=player_track_continuity,
+        ball_track_continuity=ball_track_continuity,
+        player_single_frame_track_ratio=player_single_frame_ratio,
+        ball_single_frame_track_ratio=ball_single_frame_ratio,
+        player_track_births_per_100_frames=player_track_births,
+        ball_track_births_per_100_frames=ball_track_births,
         keypoint_coverage=keypoint_coverage,
         team_assignment_coverage=team_assignment_coverage,
+        team_track_consistency=team_track_consistency,
         team_a_detections=team_a_detections,
         team_b_detections=team_b_detections,
         calibrated_position_coverage=calibrated_coverage,
+        calibrated_player_coverage=calibrated_player_coverage,
+        calibrated_ball_coverage=calibrated_ball_coverage,
         field_geometry_frame_coverage=field_geometry_coverage,
         average_field_line_segments=average_field_segments,
         average_field_intersections=average_field_intersections,

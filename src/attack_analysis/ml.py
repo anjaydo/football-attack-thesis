@@ -21,6 +21,7 @@ XG_FEATURE_COLUMNS = (
     "is_regular_play",
     "is_counter",
     "is_dead_ball",
+    "is_penalty",
     "minute",
     "second",
 )
@@ -161,7 +162,7 @@ def train_xg_models(
     target: str = "goal",
     seed: int = 42,
 ) -> dict[str, Any]:
-    joblib, _, pd, _, _, _ = _dependencies()
+    joblib, np, pd, _, LogisticRegression, _ = _dependencies()
     frame = pd.read_csv(csv_path)
     required = set(XG_FEATURE_COLUMNS) | {match_column, target}
     missing = sorted(required.difference(frame.columns))
@@ -186,7 +187,38 @@ def train_xg_models(
         validation[name] = _classification_metrics(y.loc[masks["validation"]], probabilities, multiclass=False)
     selected_name = min(validation, key=lambda name: validation[name]["brier"])
     selected = candidates[selected_name]
-    test_probabilities = selected.predict_proba(x.loc[masks["test"]])[:, 1]
+    validation_probabilities = selected.predict_proba(x.loc[masks["validation"]])[:, 1]
+    calibrator = LogisticRegression(max_iter=1000, random_state=seed).fit(
+        np.asarray(validation_probabilities).reshape(-1, 1),
+        y.loc[masks["validation"]],
+    )
+    calibrated_validation = calibrator.predict_proba(
+        np.asarray(validation_probabilities).reshape(-1, 1)
+    )[:, 1]
+    calibration_enabled = (
+        _classification_metrics(
+            y.loc[masks["validation"]], calibrated_validation, multiclass=False
+        )["brier"]
+        <= validation[selected_name]["brier"]
+    )
+    if not calibration_enabled:
+        calibrator = None
+    raw_test_probabilities = selected.predict_proba(x.loc[masks["test"]])[:, 1]
+    test_probabilities = (
+        calibrator.predict_proba(np.asarray(raw_test_probabilities).reshape(-1, 1))[:, 1]
+        if calibrator is not None
+        else raw_test_probabilities
+    )
+    from .xg import heuristic_xg
+
+    test_rows = frame.loc[masks["test"]]
+    heuristic_probabilities = np.asarray(
+        [
+            heuristic_xg((float(row.x_shooter), float(row.y_shooter)))
+            for row in test_rows.itertuples(index=False)
+        ],
+        dtype=float,
+    )
     report = {
         "task": "xg",
         "selected_model": selected_name,
@@ -194,10 +226,34 @@ def train_xg_models(
         "target": target,
         "split": split.to_dict(),
         "validation": validation,
+        "calibration": {
+            "method": "platt_logistic" if calibration_enabled else "none",
+            "enabled": calibration_enabled,
+        },
+        "dataset": {
+            "rows": int(len(frame)),
+            "matches": int(frame[match_column].astype(str).nunique()),
+            "goals": int(y.sum()),
+            "goal_rate": float(y.mean()),
+            "split_rows": {name: int(mask.sum()) for name, mask in masks.items()},
+        },
+        "heuristic_test": _classification_metrics(
+            y.loc[masks["test"]], heuristic_probabilities, multiclass=False
+        ),
         "test": _classification_metrics(y.loc[masks["test"]], test_probabilities, multiclass=False),
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump({"model": selected, "medians": medians, "report": report}, output_path)
+    joblib.dump(
+        {
+            "schema_version": "xg-v1",
+            "model": selected,
+            "calibrator": calibrator,
+            "medians": medians,
+            "feature_columns": list(XG_FEATURE_COLUMNS),
+            "report": report,
+        },
+        output_path,
+    )
     output_path.with_suffix(".metrics.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
 

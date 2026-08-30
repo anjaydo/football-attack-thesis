@@ -6,6 +6,7 @@ from statistics import median
 from typing import Callable, Mapping, Sequence
 
 from .models import Event
+from .footpass_terminal_inference import RARE_FOOTPASS_CLASSES
 
 
 def _prf(true_positive: int, predicted: int, actual: int) -> dict[str, float | int]:
@@ -22,6 +23,119 @@ def _prf(true_positive: int, predicted: int, actual: int) -> dict[str, float | i
     }
 
 
+def _hungarian_maximise(weights: Sequence[Sequence[float]]) -> list[int]:
+    """Return the maximum-weight square assignment as row -> column.
+
+    The action evaluator cannot greedily consume a nearby label: doing so can
+    strand another prediction that has only one eligible label.  This small
+    dependency-free Hungarian solver keeps the official evaluator usable in
+    the minimal research environment.
+    """
+
+    size = len(weights)
+    if not size:
+        return []
+    if any(len(row) != size for row in weights):
+        raise ValueError("Hungarian weight matrix must be square")
+    maximum = max(max(row) for row in weights)
+    costs = [[maximum - value for value in row] for row in weights]
+    row_potential = [0.0] * (size + 1)
+    column_potential = [0.0] * (size + 1)
+    matched_row = [0] * (size + 1)
+    previous_column = [0] * (size + 1)
+    epsilon = 1e-12
+
+    for row in range(1, size + 1):
+        matched_row[0] = row
+        minimum = [math.inf] * (size + 1)
+        used = [False] * (size + 1)
+        column = 0
+        while True:
+            used[column] = True
+            current_row = matched_row[column]
+            delta = math.inf
+            next_column = 0
+            for candidate in range(1, size + 1):
+                if used[candidate]:
+                    continue
+                reduced = (
+                    costs[current_row - 1][candidate - 1]
+                    - row_potential[current_row]
+                    - column_potential[candidate]
+                )
+                if reduced < minimum[candidate] - epsilon:
+                    minimum[candidate] = reduced
+                    previous_column[candidate] = column
+                if (
+                    minimum[candidate] < delta - epsilon
+                    or (
+                        abs(minimum[candidate] - delta) <= epsilon
+                        and candidate < next_column
+                    )
+                ):
+                    delta = minimum[candidate]
+                    next_column = candidate
+            for candidate in range(size + 1):
+                if used[candidate]:
+                    row_potential[matched_row[candidate]] += delta
+                    column_potential[candidate] -= delta
+                else:
+                    minimum[candidate] -= delta
+            column = next_column
+            if matched_row[column] == 0:
+                break
+        while True:
+            next_column = previous_column[column]
+            matched_row[column] = matched_row[next_column]
+            column = next_column
+            if column == 0:
+                break
+
+    assignment = [-1] * size
+    for column in range(1, size + 1):
+        if matched_row[column]:
+            assignment[matched_row[column] - 1] = column - 1
+    return assignment
+
+
+def _optimal_action_match_count(
+    actual: Sequence[Event],
+    predicted: Sequence[Event],
+    *,
+    tolerance_frames: int,
+    match_player: bool,
+) -> int:
+    """Maximise eligible match cardinality, then minimise total frame error."""
+
+    size = max(len(actual), len(predicted))
+    if not size:
+        return 0
+    cardinality_bonus = float(size + 1)
+    weights = [[0.0] * size for _ in range(size)]
+    eligible: set[tuple[int, int]] = set()
+    for actual_index, target in enumerate(actual):
+        if target.frame is None:
+            continue
+        for prediction_index, prediction in enumerate(predicted):
+            if prediction.frame is None:
+                continue
+            if target.team != prediction.team:
+                continue
+            if match_player and target.jersey != prediction.jersey:
+                continue
+            distance = abs(target.frame - prediction.frame)
+            if distance > tolerance_frames:
+                continue
+            eligible.add((actual_index, prediction_index))
+            proximity = (tolerance_frames + 1 - distance) / (tolerance_frames + 1)
+            weights[actual_index][prediction_index] = cardinality_bonus + proximity
+    assignment = _hungarian_maximise(weights)
+    return sum(
+        (actual_index, prediction_index) in eligible
+        for actual_index, prediction_index in enumerate(assignment)
+    )
+
+
 def action_spotting_report(
     ground_truth: Sequence[Event],
     predictions: Sequence[Event],
@@ -29,7 +143,7 @@ def action_spotting_report(
     tolerance_frames: int = 12,
     match_player: bool = True,
 ) -> dict[str, object]:
-    """Greedy one-to-one spotting metrics using FOOTPASS team/player/action identity."""
+    """Optimal one-to-one spotting metrics using FOOTPASS identity fields."""
     if tolerance_frames < 0:
         raise ValueError("tolerance_frames must be non-negative")
     classes = sorted({event.event_type for event in (*ground_truth, *predictions)})
@@ -38,24 +152,12 @@ def action_spotting_report(
     for event_type in classes:
         actual = [event for event in ground_truth if event.event_type == event_type]
         predicted = [event for event in predictions if event.event_type == event_type]
-        remaining = set(range(len(actual)))
-        true_positive = 0
-        for prediction in sorted(predicted, key=lambda item: item.confidence or 0.0, reverse=True):
-            if prediction.frame is None:
-                continue
-            candidates = [
-                index
-                for index in remaining
-                if actual[index].frame is not None
-                and actual[index].team == prediction.team
-                and (not match_player or actual[index].jersey == prediction.jersey)
-                and abs(actual[index].frame - prediction.frame) <= tolerance_frames
-            ]
-            if not candidates:
-                continue
-            best = min(candidates, key=lambda index: abs(actual[index].frame - prediction.frame))
-            remaining.remove(best)
-            true_positive += 1
+        true_positive = _optimal_action_match_count(
+            actual,
+            predicted,
+            tolerance_frames=tolerance_frames,
+            match_player=match_player,
+        )
         by_class[event_type] = _prf(true_positive, len(predicted), len(actual))
         total_tp += true_positive
         total_predicted += len(predicted)
@@ -63,6 +165,7 @@ def action_spotting_report(
     return {
         "tolerance_frames": tolerance_frames,
         "match_player": match_player,
+        "matching": "hungarian_cardinality_then_frame_error",
         "class_wise": by_class,
         "micro": _prf(total_tp, total_predicted, total_actual),
         "macro_f1": sum(float(item["f1"]) for item in by_class.values()) / len(by_class)
@@ -110,7 +213,7 @@ def action_spotting_dataset_report(
     true_positive = sum(int(item["true_positive"]) for item in class_wise.values())
     predicted = sum(int(item["predicted"]) for item in class_wise.values())
     actual = sum(int(item["actual"]) for item in class_wise.values())
-    return {
+    result = {
         "tolerance_frames": tolerance_frames,
         "match_player": match_player,
         "match_count": len(match_ids),
@@ -121,6 +224,17 @@ def action_spotting_dataset_report(
         else 0.0,
         "match_wise": match_wise,
     }
+    result["rare_classes"] = rare_action_class_audit(result)
+    return result
+
+
+def rare_action_class_audit(
+    report: Mapping[str, object],
+    classes: Sequence[str] = RARE_FOOTPASS_CLASSES,
+) -> dict[str, dict[str, float | int]]:
+    class_wise = dict(report.get("class_wise") or {})
+    empty = _prf(0, 0, 0)
+    return {name: dict(class_wise.get(name, empty)) for name in classes}
 
 
 def boundary_f1(

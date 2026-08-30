@@ -2,12 +2,53 @@
 .env
 .env.*
 !.env.example
+
+# Python / packaging build output
 build/
 dist/
-data/
-runs/
+*.egg-info/
+*.egg
+*.whl
+pip-wheel-metadata/
+
+# Caches and test artifacts
 __pycache__/
 *.py[cod]
-*.egg-info/
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.cache/
+
+# Logs
+*.log
+logs/
+
+# Runtime and local datasets
+data/
+runs/
+
+# Large model weights and trained artifacts (keep small JSON configs)
+models/*.joblib
+models/*.pkl
+models/*.pt
+models/*.pth
 *.pt
-.env
+*.pth
+*.onnx
+*.joblib
+*.pkl
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.mp4
+*.avi
+*.mkv
+*.zip
+*.tar
+*.tar.gz

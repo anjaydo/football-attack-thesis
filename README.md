@@ -1,21 +1,39 @@
-# Football Attack Effectiveness Thesis
+# Football Attack-v2 Thesis
 
-Prototype khởi đầu cho luận văn: từ video bóng đá, tái dựng trạng thái trận đấu,
-tính các đặc trưng định lượng và trả lời một đợt tấn công có hiệu quả hay không.
+Hệ thống possession-first cho video/FOOTPASS: tái dựng chuỗi kiểm soát bóng,
+xác nhận terminal rồi mới tạo attack, sau đó mới cho phép xG/value evaluation.
 
-## Phạm vi MVP
+> **Trạng thái hiện tại: `research_only`.** Contract, decoder, provenance,
+> annotation workflow và evaluator Attack-v2 đã có; chưa có human ground truth
+> hoàn chỉnh hoặc learned model vượt gate, nên không có claim “validated”.
 
-MVP hiện tại bắt đầu từ dữ liệu sự kiện có cấu trúc (tọa độ, đường chuyền, cú sút,
-xG/xT nếu có). Đây là điểm nối giữa khối computer vision và khối đánh giá:
+## Luồng Attack-v2
+
+FOOTPASS chỉ là action tức thời. Nó không được dùng trực tiếp như attack:
 
 ```text
-Video -> YOLO pose + detection -> tracking -> calibration -> events + pitch coordinates
-      -> metrics -> effectiveness model -> grounded explanation
+video/actions/tracks -> temporal clustering -> possession-state decoder
+  -> terminal-first assembly -> strict attack validation -> xG/value components
 ```
 
-Prototype đã có:
+Một `AttackSequenceV2` chỉ tồn tại khi possession hoàn chỉnh kết thúc bằng
+`shot_attempt`, `headed_attempt` hoặc `forced_goal_line_out`. Turnover, cross,
+high progression, gap, throw-in hay generic header không tự tạo attack. Gap/cut
+chỉ tạo censoring. Video forward-ball heuristic chỉ phát `shot_candidate`, không
+phát shot/xG.
 
-- schema cho một đợt tấn công;
+Đã triển khai:
+
+- schema versioned cho observed action, possession, terminal, attack và value;
+- stable IDs, field-level provenance và bốn source tier tách biệt;
+- deterministic terminal-first decoder và hạ tầng TCN/semi-Markov 5 Hz;
+- continuous human annotation cho 12 trận, validator gap/overlap, SHA-256 frozen
+  test seal chỉ cho đúng game 0/36/50 và intra-rater report;
+- Hungarian sequence metrics ở tIoU 0.25/0.5/0.75, bootstrap theo match và gates;
+- action-spotting overlap/sampler/hard-negative/freeze infrastructure;
+- tracking AP/IDF1/HOTA/team/ball/GS-HOTA-style evaluator;
+- xG-v2 missingness semantics, nested grouped CV, disjoint calibration và gates;
+- strict cache/content-tree/dataset/video/model/config/schema hash validation;
 - schema quan sát cầu thủ/bóng theo từng frame;
 - đọc metadata video qua OpenCV tùy chọn;
 - xuất video có skeleton, player/ball boxes, track ID và tốc độ;
@@ -26,20 +44,17 @@ Prototype đã có:
 - export tập YOLO một lớp từ SoccerNet, fine-tune model bóng riêng và benchmark
   confidence bằng quality gate có ground truth;
 - phát hiện scene cut và reset lịch sử speed/team;
-- suy luận baseline possession, carry, pass và turnover từ calibrated tracks;
-- tự động tách event stream thành các đợt tấn công;
-- các chỉ số progression, final-third/box entry, shot, xG và xT;
-- rule-based baseline cho điểm 0-100 và kết luận;
-- explanation deterministic chỉ dựa trên dữ liệu đã tính;
-- FOOTPASS oracle/predicted adapters, possession segmentation và attack feature contract;
-- stratified annotation manifest cho nhãn ba mức, score và confidence;
-- leakage-safe xG/effectiveness trainers với split theo match;
+- suy luận baseline possession/carry/pass/turnover từ calibrated tracks;
+- FOOTPASS adapter giữ bbox/replay, stable roster team và generic header semantics;
 - frozen role benchmark store, grounded LLM tools và claim verification;
-- Streamlit demo cho FOOTPASS, annotation và exploratory upload;
+- Streamlit demo chỉ render strict attack hoặc possession/threat research-only;
+- chọn cửa sổ thời gian trên FOOTPASS, fit homography động theo frame với holdout
+  error gate, chạy YOLO đúng frame toàn trận và lưu event/xG artifacts;
 - dữ liệu ví dụ và unit tests.
 
-Rule-based score chỉ là baseline kỹ thuật. Trong luận văn, nó sẽ được thay/thêm
-bằng mô hình học có giám sát từ nhãn của chuyên gia bóng đá.
+Legacy `Event/AttackSequence`, rule score và segmenter vẫn đọc được để tái lập
+baseline, nhưng output luôn mang nhãn `PossessionCandidateV1/legacy_unvalidated`
+và không được dùng cho headline metric hay categorical effectiveness.
 
 ## Chạy nhanh
 
@@ -106,8 +121,14 @@ attack-analysis run-pipeline input.mp4 runs/demo `
   --max-frames 300
 ```
 
-Thêm `--calibration calibration.json` để pipeline tiếp tục từ vision sang
-event inference, attack segmentation và effectiveness scoring.
+Thêm `--calibration calibration.json` để pipeline tiếp tục từ vision sang event
+candidates và Attack-v2 decoding. Nếu chưa có terminal evidence, output là
+possession/threat và xG/effectiveness bị giữ lại.
+
+Tab FOOTPASS hiển thị riêng strict Attack-v2 và toàn bộ possession, kèm source
+tier/provenance. `FOOTPASS-assisted calibration` là oracle-assisted, không phải
+video-only fusion. xG-v1 không còn được tự động gắn vào candidate; unknown giữ là
+unknown.
 
 Mặc định pipeline dùng `yolo26n.pt` + BoT-SORT để detect/track cầu thủ,
 `yolo26n-pose.pt` để ghép skeleton theo IoU, và một tracker ByteTrack độc lập cho
@@ -128,11 +149,17 @@ Lệnh cũ `attack-analysis file.json` vẫn được hỗ trợ và tương đ�
 
 Tài liệu:
 
+- `demo.md`: kịch bản demo 8–10 phút, số liệu kỳ vọng và phương án dự phòng;
+- `docs/external-calibration-data.md`: nguồn dữ liệu calibration/tracking bổ sung,
+  license, provenance và thứ tự tích hợp;
+- `docs/possession-qualification.md`: rubric tách possession thông thường khỏi
+  attack trước khi đánh giá effectiveness;
 - `docs/cli-guide.md`: toàn bộ CLI và thứ tự chạy thử từ đầu đến cuối;
 - `docs/thesis-kickoff.md`: định hướng nghiên cứu và kế hoạch thực nghiệm;
 - `docs/data-contracts.md`: hợp đồng dữ liệu giữa video, tracking, event và scoring.
 - `docs/vision-pipeline.md`: kiến trúc YOLO, speed và giới hạn của video broadcast.
 - `docs/implementation-status.md`: ma trận chức năng, mức kiểm thử và phần còn thiếu.
+- `docs/attack-v2.md`: ontology, contracts, source tiers, gold split, evaluator và runbook v2.
 - `docs/yolo-field-preview-analysis.md`: phép thử YOLO + field geometry trên SoccerNet.
 - `docs/ball-accuracy-plan.md`: benchmark, dataset, lệnh train GPU và quality gate cho bóng.
 - `docs/research-pipeline.md`: luồng FOOTPASS oracle/predicted, annotation, ML, LLM tools và demo.

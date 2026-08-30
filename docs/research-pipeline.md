@@ -1,5 +1,10 @@
 # Research pipeline: FOOTPASS to grounded verdict
 
+> **Historical V1 runbook.** Counts such as 1,360/1,215 are heuristic
+> possession candidates, not attacks. Geometry xG and V1 categorical verdicts
+> are disabled in current output. Use [attack-v2.md](attack-v2.md) for the
+> current ontology, continuous annotation workflow and evaluator.
+
 This document describes the implemented research path. FOOTPASS videos remain on
 the external drive and are not copied into the repository.
 
@@ -18,7 +23,7 @@ mode in the Streamlit app. The adapter uses strict custom function tools and a
 JSON Schema response contract following the official
 [Responses API](https://developers.openai.com/api/reference/cli/resources/responses/methods/create).
 
-## 1. Build oracle and predicted attacks
+## 1. Build oracle and predicted Attack-v2 sequences
 
 Oracle events and tactical coordinates:
 
@@ -41,14 +46,16 @@ attack-analysis footpass-ingest `
   --output runs\game_18_H1.predicted.json
 ```
 
-The output contains normalized events, possession attacks, source identifiers and
-shot xG from the geometry fallback. Replace the fallback with a trained xG artifact
-after the leakage-safe model is validated.
+The current output contains `ObservedActionV2`, possessions and strict attacks.
+The old segments are nested only under `legacy_compatibility` as
+`PossessionCandidateV1`. xG is withheld until a v2 terminal and xG-v2 feature
+contract are independently validated.
 
 Use raw TAAD only as an ablation. On the six validation halves, the official
 strict evaluator at ±12 frames improves from TAAD micro-F1 0.410 to DST 0.719.
-DST produces 1,215 attacks and 66 shot attacks, much closer to oracle (1,360 and
-67) than raw TAAD (5,849 and 304). At a ±1 second tolerance, start/end boundary
+DST produces 1,215 **legacy candidates** and 66 candidates containing a shot,
+versus oracle 1,360/67 and raw TAAD 5,849/304. These counts are diagnostic only.
+At a ±1 second tolerance, historical V1 start/end boundary
 F1 rises from 0.230/0.251 for TAAD to 0.701/0.703 for DST. Reproduce the action
 comparison with:
 

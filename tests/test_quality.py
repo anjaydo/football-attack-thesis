@@ -75,6 +75,9 @@ class QualityReportTests(unittest.TestCase):
         self.assertGreaterEqual(report.quality_score, 90)
         self.assertEqual(report.frames_with_ball_ratio, 1.0)
         self.assertEqual(report.player_tracking_coverage, 1.0)
+        self.assertEqual(report.player_track_continuity, 1.0)
+        self.assertEqual(report.ball_track_continuity, 1.0)
+        self.assertEqual(report.player_single_frame_track_ratio, 0.0)
         self.assertEqual(report.keypoint_coverage, 1.0)
 
     def test_missing_ball_fails(self) -> None:
@@ -95,3 +98,44 @@ class QualityReportTests(unittest.TestCase):
     def test_rejects_duplicate_frame_indices(self) -> None:
         with self.assertRaises(ValueError):
             analyze_observation_quality([make_frame(0), make_frame(0)])
+
+    def test_track_id_presence_does_not_hide_fragmentation(self) -> None:
+        frames = []
+        for frame_index in range(5):
+            payload = make_frame(frame_index).to_dict()
+            for player in payload["objects"]:
+                if player["object_type"] == "player":
+                    player["track_id"] = f"{player['track_id']}-{frame_index}"
+            frames.append(FrameObservation.from_dict(payload))
+        report = analyze_observation_quality(frames)
+        self.assertEqual(report.player_tracking_coverage, 1.0)
+        self.assertEqual(report.player_single_frame_track_ratio, 1.0)
+        self.assertIn("high_player_track_fragmentation_proxy", report.warnings)
+
+    def test_reports_ball_calibration_separately_from_players(self) -> None:
+        payload = make_frame(0).to_dict()
+        for item in payload["objects"]:
+            if item["object_type"] == "player":
+                item["pitch_x"], item["pitch_y"] = 50.0, 30.0
+        report = analyze_observation_quality([FrameObservation.from_dict(payload)])
+        self.assertEqual(report.calibrated_player_coverage, 1.0)
+        self.assertEqual(report.calibrated_ball_coverage, 0.0)
+
+    def test_singleton_ball_ids_do_not_pass_as_continuous_tracks(self) -> None:
+        frames = []
+        for frame_index in range(5):
+            payload = make_frame(frame_index).to_dict()
+            for item in payload["objects"]:
+                if item["object_type"] == "ball":
+                    item["track_id"] = f"ball-{frame_index}"
+            frames.append(FrameObservation.from_dict(payload))
+
+        report = analyze_observation_quality(frames)
+
+        # Per-ID span continuity alone is 1.0 for singletons; the fragmentation
+        # and birth-rate gates must catch this otherwise perfect-looking case.
+        self.assertEqual(report.ball_track_continuity, 1.0)
+        self.assertEqual(report.ball_single_frame_track_ratio, 1.0)
+        self.assertEqual(report.ball_track_births_per_100_frames, 100.0)
+        self.assertIn("high_ball_track_fragmentation_proxy", report.warnings)
+        self.assertIn("high_ball_track_birth_rate", report.warnings)

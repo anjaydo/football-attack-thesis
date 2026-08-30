@@ -67,6 +67,9 @@ class FakeCapture:
     def release(self) -> None:
         pass
 
+    def set(self, property_id: int, value: float) -> bool:
+        return True
+
 
 class FakeWriter:
     def __init__(self) -> None:
@@ -86,6 +89,7 @@ class FakeCV2:
     CAP_PROP_FPS = 1
     CAP_PROP_FRAME_WIDTH = 2
     CAP_PROP_FRAME_HEIGHT = 3
+    CAP_PROP_POS_FRAMES = 4
     FONT_HERSHEY_SIMPLEX = 0
     LINE_AA = 0
     COLOR_BGR2LAB = 0
@@ -152,3 +156,32 @@ class VisionIntegrationTests(unittest.TestCase):
             self.assertEqual(frames[0].objects[0].object_type, "player")
             self.assertEqual(frames[0].objects[1].object_type, "ball")
             self.assertEqual(frames[0].objects[0].bbox.x1, 10.0)
+
+    def test_time_window_preserves_global_frame_and_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "input.mp4"
+            input_path.touch()
+            observations_path = root / "observations.jsonl"
+
+            with patch(
+                "attack_analysis.vision_pipeline._load_dependencies",
+                return_value=(FakeCV2(), FakeYOLO),
+            ):
+                summary = annotate_video(
+                    input_path,
+                    root / "output.mp4",
+                    VisionConfig(
+                        team_classification=False,
+                        start_frame=250,
+                        max_frames=1,
+                    ),
+                    observations_path=observations_path,
+                )
+
+            frames = read_observations_jsonl(observations_path)
+            self.assertEqual(summary.start_frame, 250)
+            self.assertEqual(summary.end_frame, 250)
+            self.assertEqual(summary.frames_processed, 1)
+            self.assertEqual(frames[0].frame_index, 250)
+            self.assertEqual(frames[0].timestamp_sec, 10.0)

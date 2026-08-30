@@ -6,8 +6,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .geometry import PitchProjector, Point
+from .geometry import Point, Projector, projector_confidence, projector_for_frame
 from .field_geometry import FieldGeometryDetector, FieldLineConfig, draw_field_geometry
+from .models import PITCH_LENGTH, PITCH_WIDTH
 from .motion import SpeedEstimator
 from .roi import PolygonROI
 from .scene import SceneCutDetector
@@ -53,6 +54,7 @@ class VisionConfig:
     team_classification: bool = True
     team_min_tracks: int = 4
     scene_cut_threshold: float | None = 0.35
+    start_frame: int = 0
     max_frames: int | None = None
     field_lines: bool = False
     field_line_min_length_ratio: float = 0.06
@@ -73,6 +75,8 @@ class VisionConfig:
                 raise ValueError(f"{name} must be between 0 and 1")
         if self.max_frames is not None and self.max_frames <= 0:
             raise ValueError("max_frames must be positive")
+        if self.start_frame < 0:
+            raise ValueError("start_frame cannot be negative")
         if self.team_min_tracks < 2:
             raise ValueError("team_min_tracks must be at least 2")
         if self.scene_cut_threshold is not None and not 0.0 < self.scene_cut_threshold <= 1.0:
@@ -103,6 +107,9 @@ class VisionRunSummary:
     ball_detection_model: str | None = None
     field_geometry_enabled: bool = False
     field_geometry_frames: int = 0
+    start_frame: int = 0
+    end_frame: int | None = None
+    calibrated_frames: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -210,6 +217,18 @@ def _speed_label(speed_per_sec: float, calibrated: bool) -> str:
     return f"{speed_per_sec:.1f} px/s"
 
 
+def _project_on_pitch(projector: Any | None, point: Point) -> Point | None:
+    if projector is None:
+        return None
+    try:
+        x, y = projector.project(point)
+    except (ArithmeticError, ValueError):
+        return None
+    if not (0.0 <= x <= PITCH_LENGTH and 0.0 <= y <= PITCH_WIDTH):
+        return None
+    return x, y
+
+
 def _draw_skeleton(cv2: Any, frame: Any, keypoints: Any, threshold: float) -> None:
     for first, second in COCO_SKELETON:
         first_conf = float(keypoints[first][2]) if len(keypoints[first]) > 2 else 1.0
@@ -229,7 +248,7 @@ def annotate_video(
     input_path: Path,
     output_path: Path,
     config: VisionConfig | None = None,
-    projector: PitchProjector | None = None,
+    projector: Projector | None = None,
     observations_path: Path | None = None,
     roi: PolygonROI | None = None,
 ) -> VisionRunSummary:
@@ -261,6 +280,8 @@ def annotate_video(
     if fps <= 0 or width <= 0 or height <= 0:
         capture.release()
         raise ValueError("video has invalid FPS or dimensions")
+    if settings.start_frame:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, settings.start_frame)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
@@ -293,8 +314,9 @@ def annotate_video(
     field_geometry_frames = 0
     player_tracks: set[int] = set()
     ball_tracks: set[int] = set()
-    frame_index = 0
-    project = projector.project if projector else None
+    frame_index = settings.start_frame
+    frames_processed = 0
+    calibrated_frames = 0
     field_detector = (
         FieldGeometryDetector(
             cv2,
@@ -312,9 +334,23 @@ def annotate_video(
             ok, frame = capture.read()
             if not ok:
                 break
-            if settings.max_frames is not None and frame_index >= settings.max_frames:
+            if settings.max_frames is not None and frames_processed >= settings.max_frames:
                 break
             timestamp_sec = frame_index / fps
+            frame_projector = projector_for_frame(projector, frame_index)
+            calibration_confidence = projector_confidence(projector, frame_index)
+            if frame_projector is not None:
+                calibrated_frames += 1
+                cv2.putText(
+                    frame,
+                    f"CALIBRATED pitch | confidence {calibration_confidence or 0.0:.2f}",
+                    (12, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (40, 230, 100),
+                    2,
+                    cv2.LINE_AA,
+                )
             scene_cut = scene_detector.update(frame) if scene_detector else False
             if scene_cut:
                 scene_cuts_detected += 1
@@ -405,13 +441,16 @@ def annotate_video(
                 None: (180, 180, 180),
             }
             for index, box, track_id, keypoints, anchor in player_items:
+                pitch_position = _project_on_pitch(frame_projector, anchor)
+                calibrated = pitch_position is not None
                 velocity = 0.0
                 if track_id is not None:
                     player_tracks.add(track_id)
                     velocity = speed.update(
-                        f"player:{track_id}", anchor, timestamp_sec, project
+                        f"player:{track_id}:{'pitch' if calibrated else 'image'}",
+                        pitch_position or anchor,
+                        timestamp_sec,
                     )
-                pitch_position = projector.project(anchor) if projector else None
                 team = team_labels.get(str(track_id)) if track_id is not None else None
                 color = team_colors[team]
                 x1, y1, x2, y2 = map(int, box)
@@ -422,7 +461,7 @@ def annotate_video(
                     cv2,
                     frame,
                     (x1, y1),
-                    f"player {team_text} #{identity} | {_speed_label(velocity, projector is not None)}",
+                    f"player {team_text} #{identity} | {_speed_label(velocity, calibrated)}",
                     color,
                 )
                 if keypoints is not None:
@@ -440,8 +479,8 @@ def annotate_video(
                         "y2": float(box[3]),
                     },
                     "anchor_image": [round(anchor[0], 3), round(anchor[1], 3)],
-                    "speed": round(velocity * 3.6 if projector else velocity, 3),
-                    "speed_unit": "km/h" if projector else "px/s",
+                    "speed": round(velocity * 3.6 if calibrated else velocity, 3),
+                    "speed_unit": "km/h" if calibrated else "px/s",
                 }
                 if team is not None:
                     player_data["team"] = team
@@ -466,18 +505,23 @@ def annotate_video(
                 center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
                 if ball_roi is not None and not ball_roi.contains(center):
                     continue
+                pitch_position = _project_on_pitch(frame_projector, center)
+                calibrated = pitch_position is not None
                 velocity = 0.0
                 if track_id is not None:
                     ball_tracks.add(track_id)
-                    velocity = speed.update(f"ball:{track_id}", center, timestamp_sec, project)
-                pitch_position = projector.project(center) if projector else None
+                    velocity = speed.update(
+                        f"ball:{track_id}:{'pitch' if calibrated else 'image'}",
+                        pitch_position or center,
+                        timestamp_sec,
+                    )
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (40, 165, 255), 2)
                 identity = "?" if track_id is None else str(track_id)
                 _draw_label(
                     cv2,
                     frame,
                     (x1, y1),
-                    f"ball #{identity} | {_speed_label(velocity, projector is not None)}",
+                    f"ball #{identity} | {_speed_label(velocity, calibrated)}",
                     (40, 165, 255),
                 )
                 ball_data: dict[str, object] = {
@@ -491,8 +535,8 @@ def annotate_video(
                         "y2": float(box[3]),
                     },
                     "anchor_image": [round(center[0], 3), round(center[1], 3)],
-                    "speed": round(velocity * 3.6 if projector else velocity, 3),
-                    "speed_unit": "km/h" if projector else "px/s",
+                    "speed": round(velocity * 3.6 if calibrated else velocity, 3),
+                    "speed_unit": "km/h" if calibrated else "px/s",
                 }
                 if pitch_position is not None:
                     ball_data["pitch_x"] = round(pitch_position[0], 3)
@@ -507,6 +551,10 @@ def annotate_video(
                     "scene_cut": scene_cut,
                     "objects": frame_objects,
                 }
+                if calibration_confidence is not None:
+                    frame_payload["calibration_confidence"] = round(
+                        calibration_confidence, 4
+                    )
                 if field_geometry is not None:
                     frame_payload["field_geometry"] = field_geometry.to_dict()
                 observations_file.write(
@@ -514,8 +562,9 @@ def annotate_video(
                     + "\n"
                 )
             frame_index += 1
-            if frame_index % 100 == 0:
-                print(f"processed {frame_index} frames", file=sys.stderr)
+            frames_processed += 1
+            if frames_processed % 100 == 0:
+                print(f"processed {frames_processed} frames", file=sys.stderr)
     finally:
         if observations_file:
             observations_file.close()
@@ -528,7 +577,7 @@ def annotate_video(
         observations_path=(
             str(observations_path.resolve()) if observations_path else None
         ),
-        frames_processed=frame_index,
+        frames_processed=frames_processed,
         fps=round(fps, 4),
         width=width,
         height=height,
@@ -543,4 +592,7 @@ def annotate_video(
         scene_cuts_detected=scene_cuts_detected,
         field_geometry_enabled=settings.field_lines,
         field_geometry_frames=field_geometry_frames,
+        start_frame=settings.start_frame,
+        end_frame=(frame_index - 1 if frames_processed else None),
+        calibrated_frames=calibrated_frames,
     )

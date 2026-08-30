@@ -25,6 +25,8 @@ class ClassDetectionMetrics:
     f1: float
     mean_matched_iou: float | None
     mean_center_error_px: float | None
+    ap50: float
+    map_50_95: float
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -52,12 +54,13 @@ def _metrics(
     ],
     iou_threshold: float,
 ) -> ClassDetectionMetrics:
+    pairs = tuple(frame_pairs)
     prediction_count = 0
     ground_truth_count = 0
     true_positives = 0
     matched_ious: list[float] = []
     center_errors: list[float] = []
-    for predictions, targets in frame_pairs:
+    for predictions, targets in pairs:
         prediction_count += len(predictions)
         ground_truth_count += len(targets)
         unmatched = set(range(len(targets)))
@@ -80,6 +83,7 @@ def _metrics(
     precision = true_positives / prediction_count if prediction_count else 0.0
     recall = true_positives / ground_truth_count if ground_truth_count else 0.0
     f1 = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+    aps = [_average_precision(pairs, 0.5 + 0.05 * index) for index in range(10)]
     return ClassDetectionMetrics(
         ground_truth=ground_truth_count,
         predictions=prediction_count,
@@ -95,7 +99,65 @@ def _metrics(
         mean_center_error_px=(
             round(sum(center_errors) / len(center_errors), 3) if center_errors else None
         ),
+        ap50=round(aps[0], 4),
+        map_50_95=round(sum(aps) / len(aps), 4),
     )
+
+
+def _average_precision(
+    frame_pairs: tuple[tuple[list[tuple[float, BoundingBox]], list[BoundingBox]], ...],
+    iou_threshold: float,
+) -> float:
+    ground_truth_count = sum(len(targets) for _, targets in frame_pairs)
+    if ground_truth_count == 0:
+        return 0.0
+    predictions = sorted(
+        (
+            (confidence, frame_index, box)
+            for frame_index, (items, _) in enumerate(frame_pairs)
+            for confidence, box in items
+        ),
+        key=lambda item: (-item[0], item[1]),
+    )
+    matched: dict[int, set[int]] = {index: set() for index in range(len(frame_pairs))}
+    true_positive_flags: list[int] = []
+    false_positive_flags: list[int] = []
+    for _, frame_index, prediction in predictions:
+        targets = frame_pairs[frame_index][1]
+        candidates = [
+            (target_index, _box_iou(prediction, target))
+            for target_index, target in enumerate(targets)
+            if target_index not in matched[frame_index]
+        ]
+        if not candidates:
+            true_positive_flags.append(0)
+            false_positive_flags.append(1)
+            continue
+        target_index, overlap = max(candidates, key=lambda item: item[1])
+        if overlap >= iou_threshold:
+            matched[frame_index].add(target_index)
+            true_positive_flags.append(1)
+            false_positive_flags.append(0)
+        else:
+            true_positive_flags.append(0)
+            false_positive_flags.append(1)
+
+    cumulative_tp = 0
+    cumulative_fp = 0
+    recalls: list[float] = []
+    precisions: list[float] = []
+    for true_positive, false_positive in zip(true_positive_flags, false_positive_flags):
+        cumulative_tp += true_positive
+        cumulative_fp += false_positive
+        recalls.append(cumulative_tp / ground_truth_count)
+        precisions.append(cumulative_tp / max(1, cumulative_tp + cumulative_fp))
+    return sum(
+        max(
+            (precision for recall, precision in zip(recalls, precisions) if recall >= level),
+            default=0.0,
+        )
+        for level in (index / 100.0 for index in range(101))
+    ) / 101.0
 
 
 def _ground_truth_box(annotation: dict[str, object]) -> BoundingBox | None:

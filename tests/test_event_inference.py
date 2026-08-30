@@ -2,8 +2,10 @@ import unittest
 
 from attack_analysis.event_inference import (
     EventInferenceConfig,
+    enrich_shots_with_trained_xg,
     infer_events_from_observations,
 )
+from attack_analysis.models import Event
 from attack_analysis.observations import FrameObservation
 from attack_analysis.segmentation import segment_attacks
 
@@ -119,7 +121,7 @@ class EventInferenceTests(unittest.TestCase):
         )
         self.assertNotIn("pass", [event.event_type for event in events])
 
-    def test_infers_shot_and_geometry_xg_from_ball_trajectory(self) -> None:
+    def test_forward_ball_trajectory_stays_unverified_and_has_no_xg(self) -> None:
         owner_frame = frame(0, "a1", "team_a", 80)
         flight_frames = [
             FrameObservation.from_dict(
@@ -138,8 +140,40 @@ class EventInferenceTests(unittest.TestCase):
             ),
         ]
         events = infer_events_from_observations([owner_frame, *flight_frames])
-        shots = [event for event in events if event.event_type == "shot"]
-        self.assertEqual(len(shots), 1)
-        self.assertIsNotNone(shots[0].xg)
-        self.assertGreater(shots[0].xg, 0)
-        self.assertEqual(shots[0].xg_source, "heuristic_geometry_v1")
+        candidates = [event for event in events if event.event_type == "shot_candidate"]
+        self.assertEqual(len(candidates), 1)
+        self.assertIsNone(candidates[0].xg)
+        self.assertIsNone(candidates[0].xg_source)
+        self.assertEqual(candidates[0].outcome, "unverified")
+
+    def test_trained_xg_receives_calibrated_video_context(self) -> None:
+        class FakeModel:
+            source = "trained_xg:test:xg-v1"
+
+            def predict(self, features):
+                self.features = features
+                return 0.42
+
+        observation = FrameObservation.from_dict(
+            {
+                "frame_index": 25,
+                "timestamp_sec": 1.0,
+                "objects": [
+                    tracked_object("a1", "player", 90, 34, "team_a"),
+                    tracked_object("b1", "player", 91, 34, "team_b"),
+                    tracked_object("gk", "goalkeeper", 103, 34, "team_b"),
+                ],
+            }
+        )
+        model = FakeModel()
+        enriched = enrich_shots_with_trained_xg(
+            (Event(1.0, "shot", "team_a", x=90, y=34, xg=0.1),),
+            (observation,),
+            model,
+        )
+
+        self.assertEqual(enriched[0].xg, 0.42)
+        self.assertEqual(enriched[0].xg_source, "trained_xg:test:xg-v1")
+        self.assertEqual(enriched[0].xg_inputs["foe_players"], 2)
+        self.assertEqual(enriched[0].xg_inputs["defending_players"], 1)
+        self.assertEqual(model.features["x_goalkeeper"], 103)

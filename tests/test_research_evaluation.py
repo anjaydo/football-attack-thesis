@@ -29,6 +29,36 @@ class ResearchEvaluationTests(unittest.TestCase):
         report = action_spotting_report(actual, predicted)
         self.assertEqual(report["micro"]["true_positive"], 0)
 
+    def test_action_spotting_uses_global_assignment_not_confidence_greedy(self) -> None:
+        # Prediction at frame 10 can match either label. A confidence-first
+        # greedy matcher takes frame 5 and strands the exact frame-5
+        # prediction; the cardinality-first optimum recovers both events.
+        actual = (
+            Event(timestamp=0.2, frame=5, event_type="pass", team="0", jersey=9),
+            Event(timestamp=0.6, frame=15, event_type="pass", team="0", jersey=9),
+        )
+        predicted = (
+            Event(
+                timestamp=0.4,
+                frame=10,
+                event_type="pass",
+                team="0",
+                jersey=9,
+                confidence=0.99,
+            ),
+            Event(
+                timestamp=0.2,
+                frame=5,
+                event_type="pass",
+                team="0",
+                jersey=9,
+                confidence=0.10,
+            ),
+        )
+        report = action_spotting_report(actual, predicted, tolerance_frames=5)
+        self.assertEqual(report["micro"]["true_positive"], 2)
+        self.assertEqual(report["micro"]["f1"], 1.0)
+
     def test_dataset_report_never_matches_events_across_matches(self) -> None:
         actual = Event(timestamp=1, frame=25, event_type="pass", team="0", jersey=9)
         predicted = Event(timestamp=1, frame=25, event_type="pass", team="0", jersey=9)
@@ -51,6 +81,13 @@ class ResearchEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(report["match_count"], 2)
         self.assertAlmostEqual(report["estimate"], 2 / 3)
+
+    def test_rare_classes_are_sliced_from_class_wise(self) -> None:
+        actual = (Event(timestamp=1, frame=25, event_type="shot", team="0"),)
+        predicted = (Event(timestamp=1, frame=25, event_type="shot", team="0"),)
+        report = action_spotting_dataset_report({"m": actual}, {"m": predicted})
+        self.assertEqual(report["rare_classes"]["shot"]["true_positive"], 1)
+        self.assertEqual(report["rare_classes"]["header"]["actual"], 0)
 
 
 if __name__ == "__main__":

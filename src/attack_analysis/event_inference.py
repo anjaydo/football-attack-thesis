@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import hypot
 from typing import Iterable
 
 from .geometry import Point
 from .models import Event, PITCH_LENGTH
 from .observations import FrameObservation, TrackedObject
-from .xg import heuristic_xg
+from .xg import shot_angle, shot_distance
+from .xg import TrainedXGModel
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,12 @@ def _infer_shot(
     following: _PossessionSegment | None,
     config: EventInferenceConfig,
 ) -> Event | None:
+    """Emit trajectory evidence only; never assert an attempt on goal.
+
+    A fast forward ball can be a pass, clearance, cross, or shot.  Until an
+    action/terminal model confirms intent, this candidate is not eligible for
+    Attack-v2 qualification or xG.
+    """
     start = _normalize(segment.end.ball, segment.team, config)
     if start[0] < config.shot_min_x:
         return None
@@ -156,15 +163,14 @@ def _infer_shot(
         return None
     return Event(
         timestamp=segment.end.timestamp_sec,
-        event_type="shot",
+        event_type="shot_candidate",
         team=segment.team,
         x=start[0],
         y=start[1],
         end_x=end[0],
         end_y=end[1],
-        outcome="attempt",
-        xg=heuristic_xg(start),
-        xg_source="heuristic_geometry_v1",
+        outcome="unverified",
+        source="video_forward_ball_candidate_v1",
     )
 
 
@@ -303,3 +309,77 @@ def infer_events_from_observations(
 
     events.sort(key=lambda event: event.timestamp)
     return tuple(events)
+
+
+def enrich_shots_with_trained_xg(
+    events: Iterable[Event],
+    frames: Iterable[FrameObservation],
+    model: TrainedXGModel,
+    config: EventInferenceConfig | None = None,
+) -> tuple[Event, ...]:
+    """Replace geometry xG with the trained model using calibrated video context."""
+    from .xg_data import PRESSURE_RADIUS_M
+
+    settings = config or EventInferenceConfig()
+    frame_sequence = tuple(frames)
+    enriched: list[Event] = []
+    for event in events:
+        if event.event_type != "shot" or event.x is None or event.y is None:
+            enriched.append(event)
+            continue
+        nearest = (
+            min(
+                frame_sequence,
+                key=lambda frame: abs(frame.timestamp_sec - event.timestamp),
+            )
+            if frame_sequence
+            else None
+        )
+        visible = []
+        if nearest is not None:
+            for item in nearest.objects:
+                position = _position(item)
+                if (
+                    item.object_type not in {"player", "goalkeeper"}
+                    or item.team is None
+                    or position is None
+                ):
+                    continue
+                visible.append((item, _normalize(position, event.team, settings)))
+        opponents = [item for item in visible if item[0].team != event.team]
+        allies = [item for item in visible if item[0].team == event.team]
+        goalkeeper = next(
+            (position for item, position in opponents if item.object_type == "goalkeeper"),
+            None,
+        )
+        nearby_defenders = sum(
+            hypot(position[0] - event.x, position[1] - event.y) <= PRESSURE_RADIUS_M
+            for _, position in opponents
+        )
+        features: dict[str, float | int | None] = {
+            "x_shooter": event.x,
+            "y_shooter": event.y,
+            "shot_angle": shot_angle((event.x, event.y)),
+            "distance_to_goal": shot_distance((event.x, event.y)),
+            "x_goalkeeper": goalkeeper[0] if goalkeeper else None,
+            "y_goalkeeper": goalkeeper[1] if goalkeeper else None,
+            "foe_players": len(opponents),
+            "ally_players": max(0, len(allies) - 1),
+            "defending_players": nearby_defenders,
+            "under_pressure": int(nearby_defenders > 0),
+            "is_regular_play": 1,
+            "is_counter": 0,
+            "is_dead_ball": 0,
+            "is_penalty": 0,
+            "minute": int(event.timestamp // 60),
+            "second": int(event.timestamp % 60),
+        }
+        enriched.append(
+            replace(
+                event,
+                xg=model.predict(features),
+                xg_source=model.source,
+                xg_inputs=features,
+            )
+        )
+    return tuple(enriched)

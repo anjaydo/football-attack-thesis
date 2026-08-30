@@ -149,7 +149,9 @@ class EvidenceBundle:
 
     @property
     def downstream_ready(self) -> bool:
-        required = ("events", "calibration", "tracking")
+        required = ["events", "calibration", "tracking"]
+        if "attack_qualified" in self.quality_gates:
+            required.append("attack_qualified")
         return all(self.quality_gates.get(key, False) for key in required)
 
     def evidence_ids(self) -> frozenset[str]:

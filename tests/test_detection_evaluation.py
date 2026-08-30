@@ -73,6 +73,8 @@ class DetectionEvaluationTests(unittest.TestCase):
 
         self.assertEqual(report["person"]["true_positives"], 2)
         self.assertEqual(report["person"]["f1"], 1.0)
+        self.assertEqual(report["person"]["ap50"], 1.0)
+        self.assertEqual(report["person"]["map_50_95"], 1.0)
         self.assertEqual(report["ball"]["true_positives"], 1)
         self.assertEqual(report["ball"]["mean_center_error_px"], 0.0)
 

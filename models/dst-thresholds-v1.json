@@ -1,0 +1,701 @@
+{
+  "schema_version": "dst-thresholds-v1",
+  "baseline_threshold": 0.15,
+  "tolerance_frames": 12,
+  "tuning_matches": [
+    "game_18_H1",
+    "game_18_H2"
+  ],
+  "held_out_matches": [
+    "game_24_H1",
+    "game_24_H2",
+    "game_47_H1",
+    "game_47_H2"
+  ],
+  "thresholds": {
+    "block": 0.65,
+    "cross": 0.65,
+    "drive": 0.8,
+    "header": 0.5,
+    "pass": 0.6,
+    "shot": 0.35,
+    "tackle": 0.45,
+    "throw_in": 0.6
+  },
+  "tuning_class_f1": {
+    "block": 0.18181818181818182,
+    "cross": 0.5915492957746479,
+    "drive": 0.750188679245283,
+    "header": 0.29702970297029696,
+    "pass": 0.7497116493656287,
+    "shot": 0.6,
+    "tackle": 0.18181818181818182,
+    "throw_in": 0.7536231884057971
+  },
+  "tuning": {
+    "baseline": {
+      "tolerance_frames": 12,
+      "match_player": true,
+      "match_count": 2,
+      "class_wise": {
+        "block": {
+          "true_positive": 4,
+          "predicted": 17,
+          "actual": 31,
+          "precision": 0.23529411764705882,
+          "recall": 0.12903225806451613,
+          "f1": 0.16666666666666666
+        },
+        "cross": {
+          "true_positive": 22,
+          "predicted": 38,
+          "actual": 40,
+          "precision": 0.5789473684210527,
+          "recall": 0.55,
+          "f1": 0.5641025641025641
+        },
+        "drive": {
+          "true_positive": 528,
+          "predicted": 730,
+          "actual": 738,
+          "precision": 0.7232876712328767,
+          "recall": 0.7154471544715447,
+          "f1": 0.7193460490463215
+        },
+        "header": {
+          "true_positive": 15,
+          "predicted": 49,
+          "actual": 61,
+          "precision": 0.30612244897959184,
+          "recall": 0.2459016393442623,
+          "f1": 0.27272727272727276
+        },
+        "pass": {
+          "true_positive": 664,
+          "predicted": 856,
+          "actual": 936,
+          "precision": 0.7757009345794392,
+          "recall": 0.7094017094017094,
+          "f1": 0.7410714285714285
+        },
+        "shot": {
+          "true_positive": 15,
+          "predicted": 25,
+          "actual": 27,
+          "precision": 0.6,
+          "recall": 0.5555555555555556,
+          "f1": 0.576923076923077
+        },
+        "tackle": {
+          "true_positive": 1,
+          "predicted": 3,
+          "actual": 10,
+          "precision": 0.3333333333333333,
+          "recall": 0.1,
+          "f1": 0.15384615384615383
+        },
+        "throw_in": {
+          "true_positive": 26,
+          "predicted": 38,
+          "actual": 36,
+          "precision": 0.6842105263157895,
+          "recall": 0.7222222222222222,
+          "f1": 0.7027027027027027
+        }
+      },
+      "micro": {
+        "true_positive": 1275,
+        "predicted": 1756,
+        "actual": 1879,
+        "precision": 0.7260820045558086,
+        "recall": 0.6785524215007983,
+        "f1": 0.7015130674002751
+      },
+      "macro_f1": 0.4871732393232734,
+      "match_wise": {
+        "game_18_H1": {
+          "precision": 0.7708119218910586,
+          "recall": 0.7197696737044146,
+          "f1": 0.7444168734491317,
+          "predicted": 973,
+          "actual": 1042
+        },
+        "game_18_H2": {
+          "precision": 0.6704980842911877,
+          "recall": 0.6272401433691757,
+          "f1": 0.6481481481481483,
+          "predicted": 783,
+          "actual": 837
+        }
+      }
+    },
+    "calibrated": {
+      "tolerance_frames": 12,
+      "match_player": true,
+      "match_count": 2,
+      "class_wise": {
+        "block": {
+          "true_positive": 4,
+          "predicted": 13,
+          "actual": 31,
+          "precision": 0.3076923076923077,
+          "recall": 0.12903225806451613,
+          "f1": 0.18181818181818182
+        },
+        "cross": {
+          "true_positive": 21,
+          "predicted": 31,
+          "actual": 40,
+          "precision": 0.6774193548387096,
+          "recall": 0.525,
+          "f1": 0.5915492957746479
+        },
+        "drive": {
+          "true_positive": 497,
+          "predicted": 587,
+          "actual": 738,
+          "precision": 0.8466780238500852,
+          "recall": 0.6734417344173442,
+          "f1": 0.750188679245283
+        },
+        "header": {
+          "true_positive": 15,
+          "predicted": 40,
+          "actual": 61,
+          "precision": 0.375,
+          "recall": 0.2459016393442623,
+          "f1": 0.29702970297029696
+        },
+        "pass": {
+          "true_positive": 650,
+          "predicted": 798,
+          "actual": 936,
+          "precision": 0.8145363408521303,
+          "recall": 0.6944444444444444,
+          "f1": 0.7497116493656287
+        },
+        "shot": {
+          "true_positive": 15,
+          "predicted": 23,
+          "actual": 27,
+          "precision": 0.6521739130434783,
+          "recall": 0.5555555555555556,
+          "f1": 0.6
+        },
+        "tackle": {
+          "true_positive": 1,
+          "predicted": 1,
+          "actual": 10,
+          "precision": 1.0,
+          "recall": 0.1,
+          "f1": 0.18181818181818182
+        },
+        "throw_in": {
+          "true_positive": 26,
+          "predicted": 33,
+          "actual": 36,
+          "precision": 0.7878787878787878,
+          "recall": 0.7222222222222222,
+          "f1": 0.7536231884057971
+        }
+      },
+      "micro": {
+        "true_positive": 1229,
+        "predicted": 1526,
+        "actual": 1879,
+        "precision": 0.8053735255570118,
+        "recall": 0.6540713145290048,
+        "f1": 0.7218795888399412
+      },
+      "macro_f1": 0.5132173599247521,
+      "match_wise": {
+        "game_18_H1": {
+          "precision": 0.8404624277456647,
+          "recall": 0.6976967370441459,
+          "f1": 0.7624541164132146,
+          "predicted": 865,
+          "actual": 1042
+        },
+        "game_18_H2": {
+          "precision": 0.7594553706505295,
+          "recall": 0.5997610513739546,
+          "f1": 0.6702269692923898,
+          "predicted": 661,
+          "actual": 837
+        }
+      }
+    }
+  },
+  "held_out": {
+    "baseline": {
+      "tolerance_frames": 12,
+      "match_player": true,
+      "match_count": 4,
+      "class_wise": {
+        "block": {
+          "true_positive": 12,
+          "predicted": 35,
+          "actual": 47,
+          "precision": 0.34285714285714286,
+          "recall": 0.2553191489361702,
+          "f1": 0.2926829268292683
+        },
+        "cross": {
+          "true_positive": 42,
+          "predicted": 61,
+          "actual": 71,
+          "precision": 0.6885245901639344,
+          "recall": 0.5915492957746479,
+          "f1": 0.6363636363636364
+        },
+        "drive": {
+          "true_positive": 1235,
+          "predicted": 1668,
+          "actual": 1732,
+          "precision": 0.7404076738609112,
+          "recall": 0.7130484988452656,
+          "f1": 0.7264705882352941
+        },
+        "header": {
+          "true_positive": 30,
+          "predicted": 96,
+          "actual": 101,
+          "precision": 0.3125,
+          "recall": 0.297029702970297,
+          "f1": 0.3045685279187817
+        },
+        "pass": {
+          "true_positive": 1609,
+          "predicted": 2079,
+          "actual": 2123,
+          "precision": 0.7739297739297739,
+          "recall": 0.7578897786151673,
+          "f1": 0.7658257972394098
+        },
+        "shot": {
+          "true_positive": 25,
+          "predicted": 41,
+          "actual": 40,
+          "precision": 0.6097560975609756,
+          "recall": 0.625,
+          "f1": 0.6172839506172839
+        },
+        "tackle": {
+          "true_positive": 0,
+          "predicted": 4,
+          "actual": 16,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0
+        },
+        "throw_in": {
+          "true_positive": 39,
+          "predicted": 66,
+          "actual": 61,
+          "precision": 0.5909090909090909,
+          "recall": 0.639344262295082,
+          "f1": 0.6141732283464568
+        }
+      },
+      "micro": {
+        "true_positive": 2992,
+        "predicted": 4050,
+        "actual": 4191,
+        "precision": 0.7387654320987654,
+        "recall": 0.7139107611548556,
+        "f1": 0.7261254702099261
+      },
+      "macro_f1": 0.49467108194376636,
+      "match_wise": {
+        "game_24_H1": {
+          "precision": 0.756786102062975,
+          "recall": 0.7543290043290043,
+          "f1": 0.7555555555555554,
+          "predicted": 921,
+          "actual": 924
+        },
+        "game_24_H2": {
+          "precision": 0.6597222222222222,
+          "recall": 0.6321292775665399,
+          "f1": 0.645631067961165,
+          "predicted": 1008,
+          "actual": 1052
+        },
+        "game_47_H1": {
+          "precision": 0.7841788478073947,
+          "recall": 0.7587354409317804,
+          "f1": 0.771247357293869,
+          "predicted": 1163,
+          "actual": 1202
+        },
+        "game_47_H2": {
+          "precision": 0.7494780793319415,
+          "recall": 0.7087857847976308,
+          "f1": 0.7285641806189751,
+          "predicted": 958,
+          "actual": 1013
+        }
+      }
+    },
+    "calibrated": {
+      "tolerance_frames": 12,
+      "match_player": true,
+      "match_count": 4,
+      "class_wise": {
+        "block": {
+          "true_positive": 9,
+          "predicted": 26,
+          "actual": 47,
+          "precision": 0.34615384615384615,
+          "recall": 0.19148936170212766,
+          "f1": 0.2465753424657534
+        },
+        "cross": {
+          "true_positive": 38,
+          "predicted": 50,
+          "actual": 71,
+          "precision": 0.76,
+          "recall": 0.5352112676056338,
+          "f1": 0.628099173553719
+        },
+        "drive": {
+          "true_positive": 1131,
+          "predicted": 1363,
+          "actual": 1732,
+          "precision": 0.8297872340425532,
+          "recall": 0.6530023094688222,
+          "f1": 0.7308562197092083
+        },
+        "header": {
+          "true_positive": 25,
+          "predicted": 78,
+          "actual": 101,
+          "precision": 0.32051282051282054,
+          "recall": 0.24752475247524752,
+          "f1": 0.2793296089385475
+        },
+        "pass": {
+          "true_positive": 1564,
+          "predicted": 1932,
+          "actual": 2123,
+          "precision": 0.8095238095238095,
+          "recall": 0.7366933584550165,
+          "f1": 0.7713933415536376
+        },
+        "shot": {
+          "true_positive": 25,
+          "predicted": 40,
+          "actual": 40,
+          "precision": 0.625,
+          "recall": 0.625,
+          "f1": 0.625
+        },
+        "tackle": {
+          "true_positive": 0,
+          "predicted": 2,
+          "actual": 16,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0
+        },
+        "throw_in": {
+          "true_positive": 39,
+          "predicted": 58,
+          "actual": 61,
+          "precision": 0.6724137931034483,
+          "recall": 0.639344262295082,
+          "f1": 0.6554621848739496
+        }
+      },
+      "micro": {
+        "true_positive": 2831,
+        "predicted": 3549,
+        "actual": 4191,
+        "precision": 0.7976894899971823,
+        "recall": 0.6754951085659747,
+        "f1": 0.7315245478036175
+      },
+      "macro_f1": 0.4920894838868519,
+      "match_wise": {
+        "game_24_H1": {
+          "precision": 0.8078817733990148,
+          "recall": 0.70995670995671,
+          "f1": 0.7557603686635945,
+          "predicted": 812,
+          "actual": 924
+        },
+        "game_24_H2": {
+          "precision": 0.7244186046511628,
+          "recall": 0.5922053231939164,
+          "f1": 0.651673640167364,
+          "predicted": 860,
+          "actual": 1052
+        },
+        "game_47_H1": {
+          "precision": 0.838150289017341,
+          "recall": 0.7237936772046589,
+          "f1": 0.7767857142857143,
+          "predicted": 1038,
+          "actual": 1202
+        },
+        "game_47_H2": {
+          "precision": 0.8128724672228844,
+          "recall": 0.6732477788746298,
+          "f1": 0.7365010799136069,
+          "predicted": 839,
+          "actual": 1013
+        }
+      }
+    }
+  },
+  "all_matches": {
+    "baseline": {
+      "tolerance_frames": 12,
+      "match_player": true,
+      "match_count": 6,
+      "class_wise": {
+        "block": {
+          "true_positive": 16,
+          "predicted": 52,
+          "actual": 78,
+          "precision": 0.3076923076923077,
+          "recall": 0.20512820512820512,
+          "f1": 0.2461538461538462
+        },
+        "cross": {
+          "true_positive": 64,
+          "predicted": 99,
+          "actual": 111,
+          "precision": 0.6464646464646465,
+          "recall": 0.5765765765765766,
+          "f1": 0.6095238095238096
+        },
+        "drive": {
+          "true_positive": 1763,
+          "predicted": 2398,
+          "actual": 2470,
+          "precision": 0.7351959966638866,
+          "recall": 0.7137651821862349,
+          "f1": 0.7243221035332784
+        },
+        "header": {
+          "true_positive": 45,
+          "predicted": 145,
+          "actual": 162,
+          "precision": 0.3103448275862069,
+          "recall": 0.2777777777777778,
+          "f1": 0.29315960912052114
+        },
+        "pass": {
+          "true_positive": 2273,
+          "predicted": 2935,
+          "actual": 3059,
+          "precision": 0.7744463373083476,
+          "recall": 0.7430532853873815,
+          "f1": 0.758425091758425
+        },
+        "shot": {
+          "true_positive": 40,
+          "predicted": 66,
+          "actual": 67,
+          "precision": 0.6060606060606061,
+          "recall": 0.5970149253731343,
+          "f1": 0.6015037593984962
+        },
+        "tackle": {
+          "true_positive": 1,
+          "predicted": 7,
+          "actual": 26,
+          "precision": 0.14285714285714285,
+          "recall": 0.038461538461538464,
+          "f1": 0.060606060606060615
+        },
+        "throw_in": {
+          "true_positive": 65,
+          "predicted": 104,
+          "actual": 97,
+          "precision": 0.625,
+          "recall": 0.6701030927835051,
+          "f1": 0.6467661691542289
+        }
+      },
+      "micro": {
+        "true_positive": 4267,
+        "predicted": 5806,
+        "actual": 6070,
+        "precision": 0.7349293833964864,
+        "recall": 0.7029654036243822,
+        "f1": 0.7185921185584372
+      },
+      "macro_f1": 0.4925575561560832,
+      "match_wise": {
+        "game_18_H1": {
+          "precision": 0.7708119218910586,
+          "recall": 0.7197696737044146,
+          "f1": 0.7444168734491317,
+          "predicted": 973,
+          "actual": 1042
+        },
+        "game_18_H2": {
+          "precision": 0.6704980842911877,
+          "recall": 0.6272401433691757,
+          "f1": 0.6481481481481483,
+          "predicted": 783,
+          "actual": 837
+        },
+        "game_24_H1": {
+          "precision": 0.756786102062975,
+          "recall": 0.7543290043290043,
+          "f1": 0.7555555555555554,
+          "predicted": 921,
+          "actual": 924
+        },
+        "game_24_H2": {
+          "precision": 0.6597222222222222,
+          "recall": 0.6321292775665399,
+          "f1": 0.645631067961165,
+          "predicted": 1008,
+          "actual": 1052
+        },
+        "game_47_H1": {
+          "precision": 0.7841788478073947,
+          "recall": 0.7587354409317804,
+          "f1": 0.771247357293869,
+          "predicted": 1163,
+          "actual": 1202
+        },
+        "game_47_H2": {
+          "precision": 0.7494780793319415,
+          "recall": 0.7087857847976308,
+          "f1": 0.7285641806189751,
+          "predicted": 958,
+          "actual": 1013
+        }
+      }
+    },
+    "calibrated": {
+      "tolerance_frames": 12,
+      "match_player": true,
+      "match_count": 6,
+      "class_wise": {
+        "block": {
+          "true_positive": 13,
+          "predicted": 39,
+          "actual": 78,
+          "precision": 0.3333333333333333,
+          "recall": 0.16666666666666666,
+          "f1": 0.2222222222222222
+        },
+        "cross": {
+          "true_positive": 59,
+          "predicted": 81,
+          "actual": 111,
+          "precision": 0.7283950617283951,
+          "recall": 0.5315315315315315,
+          "f1": 0.6145833333333334
+        },
+        "drive": {
+          "true_positive": 1628,
+          "predicted": 1950,
+          "actual": 2470,
+          "precision": 0.8348717948717949,
+          "recall": 0.6591093117408907,
+          "f1": 0.7366515837104072
+        },
+        "header": {
+          "true_positive": 40,
+          "predicted": 118,
+          "actual": 162,
+          "precision": 0.3389830508474576,
+          "recall": 0.24691358024691357,
+          "f1": 0.2857142857142857
+        },
+        "pass": {
+          "true_positive": 2214,
+          "predicted": 2730,
+          "actual": 3059,
+          "precision": 0.810989010989011,
+          "recall": 0.7237659365805819,
+          "f1": 0.7648989462774227
+        },
+        "shot": {
+          "true_positive": 40,
+          "predicted": 63,
+          "actual": 67,
+          "precision": 0.6349206349206349,
+          "recall": 0.5970149253731343,
+          "f1": 0.6153846153846153
+        },
+        "tackle": {
+          "true_positive": 1,
+          "predicted": 3,
+          "actual": 26,
+          "precision": 0.3333333333333333,
+          "recall": 0.038461538461538464,
+          "f1": 0.06896551724137931
+        },
+        "throw_in": {
+          "true_positive": 65,
+          "predicted": 91,
+          "actual": 97,
+          "precision": 0.7142857142857143,
+          "recall": 0.6701030927835051,
+          "f1": 0.6914893617021276
+        }
+      },
+      "micro": {
+        "true_positive": 4060,
+        "predicted": 5075,
+        "actual": 6070,
+        "precision": 0.8,
+        "recall": 0.6688632619439868,
+        "f1": 0.7285778375953343
+      },
+      "macro_f1": 0.4999887331982242,
+      "match_wise": {
+        "game_18_H1": {
+          "precision": 0.8404624277456647,
+          "recall": 0.6976967370441459,
+          "f1": 0.7624541164132146,
+          "predicted": 865,
+          "actual": 1042
+        },
+        "game_18_H2": {
+          "precision": 0.7594553706505295,
+          "recall": 0.5997610513739546,
+          "f1": 0.6702269692923898,
+          "predicted": 661,
+          "actual": 837
+        },
+        "game_24_H1": {
+          "precision": 0.8078817733990148,
+          "recall": 0.70995670995671,
+          "f1": 0.7557603686635945,
+          "predicted": 812,
+          "actual": 924
+        },
+        "game_24_H2": {
+          "precision": 0.7244186046511628,
+          "recall": 0.5922053231939164,
+          "f1": 0.651673640167364,
+          "predicted": 860,
+          "actual": 1052
+        },
+        "game_47_H1": {
+          "precision": 0.838150289017341,
+          "recall": 0.7237936772046589,
+          "f1": 0.7767857142857143,
+          "predicted": 1038,
+          "actual": 1202
+        },
+        "game_47_H2": {
+          "precision": 0.8128724672228844,
+          "recall": 0.6732477788746298,
+          "f1": 0.7365010799136069,
+          "predicted": 839,
+          "actual": 1013
+        }
+      }
+    }
+  }
+}
