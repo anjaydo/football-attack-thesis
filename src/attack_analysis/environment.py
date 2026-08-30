@@ -17,6 +17,17 @@ def _package_version(distribution: str, module: str | None = None) -> str | None
         return "installed-unknown-version"
 
 
+def _bundled_ffmpeg_executable() -> str | None:
+    try:
+        from imageio_ffmpeg import get_ffmpeg_exe
+    except ImportError:
+        return None
+    try:
+        return get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
 def environment_report() -> dict[str, object]:
     packages = {
         "numpy": _package_version("numpy"),
@@ -46,8 +57,10 @@ def environment_report() -> dict[str, object]:
         recommendations.append('install vision: python -m pip install -e ".[vision]"')
     if vision_ready and not cuda_available:
         recommendations.append("use --device cpu and --max-frames 300 for the first run")
-    if shutil.which("ffmpeg") is None:
-        recommendations.append("FFmpeg is optional but required to remux original audio")
+    if shutil.which("ffmpeg") is None and _package_version("imageio-ffmpeg") is None:
+        recommendations.append(
+            'install browser H.264 support: python -m pip install "imageio-ffmpeg>=0.5"'
+        )
     if shutil.which("curl") is None:
         recommendations.append("curl is required for partial SoccerNet sequence downloads")
 
@@ -60,7 +73,7 @@ def environment_report() -> dict[str, object]:
         "platform": platform.platform(),
         "packages": packages,
         "tools": {
-            "ffmpeg": shutil.which("ffmpeg"),
+            "ffmpeg": shutil.which("ffmpeg") or _bundled_ffmpeg_executable(),
             "nvidia_smi": shutil.which("nvidia-smi"),
             "curl": shutil.which("curl"),
             "cuda_available": cuda_available,

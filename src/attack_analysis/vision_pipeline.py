@@ -186,13 +186,13 @@ def _match_keypoints(
 
 def _draw_label(cv2: Any, frame: Any, point: tuple[int, int], text: str, color: tuple[int, int, int]) -> None:
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.5
+    scale = 0.38
     thickness = 1
     (width, height), baseline = cv2.getTextSize(text, font, scale, thickness)
     x, y = point
-    y = max(height + baseline + 4, y)
-    cv2.rectangle(frame, (x, y - height - baseline - 4), (x + width + 6, y), color, -1)
-    cv2.putText(frame, text, (x + 3, y - baseline - 2), font, scale, (15, 15, 15), thickness, cv2.LINE_AA)
+    y = max(height + baseline + 3, y)
+    cv2.rectangle(frame, (x, y - height - baseline - 3), (x + width + 4, y), color, -1)
+    cv2.putText(frame, text, (x + 2, y - baseline - 1), font, scale, (15, 15, 15), thickness, cv2.LINE_AA)
 
 
 def _player_anchor(box: Any, keypoints: Any | None, threshold: float) -> Point:
@@ -344,11 +344,11 @@ def annotate_video(
                 cv2.putText(
                     frame,
                     f"CALIBRATED pitch | confidence {calibration_confidence or 0.0:.2f}",
-                    (12, 24),
+                    (10, 18),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55,
+                    0.42,
                     (40, 230, 100),
-                    2,
+                    1,
                     cv2.LINE_AA,
                 )
             scene_cut = scene_detector.update(frame) if scene_detector else False

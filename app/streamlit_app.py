@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import importlib
 import json
 import logging
 import os
@@ -14,10 +15,32 @@ import streamlit as st
 from attack_analysis.agent_tools import EvidenceToolRegistry
 from attack_analysis.attack_features import build_attack_features
 from attack_analysis.benchmarks import FrozenBenchmarkStore
-from attack_analysis.env import load_project_environment, openai_api_key_configured
-from attack_analysis.dynamic_calibration import build_footpass_dynamic_projector
+from attack_analysis.env import load_project_environment, openai_api_key_configured, openai_model
+from attack_analysis import browser_video as _browser_video
+from attack_analysis import dynamic_calibration as _dynamic_calibration
+from attack_analysis import pitch_visualization as _pitch_visualization
+
+_browser_video = importlib.reload(_browser_video)
+_dynamic_calibration = importlib.reload(_dynamic_calibration)
+_pitch_visualization = importlib.reload(_pitch_visualization)
+BROWSER_CODECS = _browser_video.BROWSER_CODECS
+sample_preview_frames = _browser_video.sample_preview_frames
+video_codec = _browser_video.video_codec
+plot_pitch_events = _pitch_visualization.plot_pitch_events
+build_footpass_dynamic_projector = _dynamic_calibration.build_footpass_dynamic_projector
 from attack_analysis.event_calibration import load_event_thresholds
 from attack_analysis.attack_v2 import FootpassAttackV2Config, decode_footpass_attack_v2
+from attack_analysis.attack_v2_shot_insights import (
+    GoldOutcomeIndex,
+    SEQUENCE_FILTER_ALL_POSSESSIONS,
+    SEQUENCE_FILTER_CENSORED_SHOT,
+    SEQUENCE_FILTER_CONFIRMED,
+    actions_with_resolved_outcome,
+    build_shot_insights,
+    filter_sequence_entries,
+    format_shot_outcome,
+    resolve_shot_outcome,
+)
 from attack_analysis.footpass import (
     FootpassSegmentationConfig,
     footpass_summary,
@@ -26,6 +49,7 @@ from attack_analysis.footpass import (
     prepare_footpass_actions_v2,
     segment_footpass_attacks,
 )
+from attack_analysis.overview import attack_v2_research_overview
 from attack_analysis.gold_annotations import (
     ANNOTATION_LABELS,
     ATTACK_TERMINALS,
@@ -44,12 +68,17 @@ from attack_analysis.llm import (
     OpenAIResponsesClient,
     describe_openai_error,
 )
-from attack_analysis.models import AttackSequence, AttackSequenceV2, PossessionSequenceV2
-from attack_analysis.pitch_visualization import plot_attack_pitch
+from attack_analysis.models import (
+    AttackSequence,
+    AttackSequenceV2,
+    Event,
+    PossessionSequenceV2,
+)
 from attack_analysis.possession import PossessionAssessment, assess_possession
 from attack_analysis.research import EvidenceBundle, EvaluationVerdict, insufficient_evidence_verdict
 from attack_analysis.upload_pipeline import run_cached_video_pipeline, vision_cache_key
 from attack_analysis.video import inspect_video
+from attack_analysis.video_paths import VideoPathResolver
 from attack_analysis.vision_pipeline import VisionConfig
 from attack_analysis.window_analysis import persist_footpass_window_stream
 
@@ -72,6 +101,53 @@ DEFAULT_EVENT_PROFILE = PROJECT_ROOT / "models" / "dst-thresholds-v1.json"
 DEFAULT_POSE_MODEL = PROJECT_ROOT / "yolo26n-pose.pt"
 DEFAULT_DETECTION_MODEL = PROJECT_ROOT / "yolo26n.pt"
 LOGGER = logging.getLogger(__name__)
+
+
+def show_event_pitch(items, *, heading: str, caption: str) -> None:
+    positioned = tuple(
+        item
+        for item in items
+        if getattr(item, "x", None) is not None and getattr(item, "y", None) is not None
+    )
+    if not positioned:
+        return
+    st.subheader(heading)
+    st.caption(caption)
+    pitch_figure = plot_pitch_events(positioned)
+    st.pyplot(pitch_figure, width="stretch")
+    plt.close(pitch_figure)
+
+
+def show_yolo_overlay(path: Path, *, heading: str) -> None:
+    """Play H.264 overlay in the browser; otherwise show sampled YOLO frames."""
+
+    if not path.is_file():
+        return
+    st.markdown(f"#### {heading}")
+    codec = ""
+    try:
+        codec = video_codec(path).strip("\x00")
+    except Exception:
+        LOGGER.exception("Could not inspect overlay codec")
+    if codec in BROWSER_CODECS:
+        st.video(str(path))
+        return
+    st.warning(
+        "OpenCV trên máy này không ghi được H.264 (thiếu OpenH264). "
+        "Trình duyệt không phát được file mp4v, nên dưới đây là khung hình overlay YOLO."
+    )
+    try:
+        frames = sample_preview_frames(path, max_frames=8)
+    except Exception as error:
+        st.error(f"Không đọc được overlay YOLO: {error}")
+        return
+    if not frames:
+        st.error("Overlay YOLO không có khung hình.")
+        return
+    columns = st.columns(min(4, len(frames)))
+    for index, frame in enumerate(frames):
+        columns[index % len(columns)].image(frame, channels="BGR", width="stretch")
+
 
 SEQUENCE_LABELS = {
     "normal_possession": "Possession thông thường",
@@ -162,11 +238,40 @@ def load_attack_v2_analysis(
         "observed_actions": [item.to_dict() for item in actions],
         **decoded.to_dict(),
         "summary": footpass_v2_summary(decoded, prepared),
+        "excluded_replay_action_ids": list(decoded.excluded_replay_action_ids),
         "legacy_compatibility": {
             "summary": footpass_summary(events, attacks),
             "possession_candidates": [item.to_dict() for item in attacks],
         },
     }
+
+
+@st.cache_resource(show_spinner=False)
+def load_gold_outcome_index():
+    return GoldOutcomeIndex.load(PROJECT_ROOT)
+
+
+def render_shot_promotion_audit(insights) -> None:
+    summary = insights.summary
+    audit_columns = st.columns(4)
+    audit_columns[0].metric("Live shots", int(summary.get("live_shots", 0)))
+    audit_columns[1].metric("Promoted Attack-v2", int(summary.get("promoted_to_attack", 0)))
+    audit_columns[2].metric("Shot terminal · censored", int(summary.get("censored_shot_terminal", 0)))
+    audit_columns[3].metric(
+        "Gold outcomes",
+        "Có" if insights.gold_available else "Chưa có",
+    )
+    if int(summary.get("live_shots", 0)) == 0:
+        st.caption("Không có action `shot` live trong hiệp đã chọn.")
+        return
+    audit_rows = [record.to_dict() for record in insights.records]
+    st.dataframe(pd.DataFrame(audit_rows), width="stretch", hide_index=True)
+    if not insights.gold_available:
+        st.caption(
+            "FOOTPASS oracle không ghi `shot_outcome`. Khi có file "
+            "`data/attack-v2-development.jsonl` hoặc `attack-v2-train.jsonl`, UI sẽ gắn "
+            "outcome từ gold annotation."
+        )
 
 
 @st.cache_resource(show_spinner=False)
@@ -178,8 +283,10 @@ def load_dynamic_projector(
     video_width: int,
     video_height: int,
     tactical_modified_at: float,
+    calibration_policy: int = 4,
 ):
     del tactical_modified_at  # Included in the Streamlit cache key.
+    del calibration_policy
     return build_footpass_dynamic_projector(
         Path(tactical_h5),
         match_key,
@@ -187,6 +294,66 @@ def load_dynamic_projector(
         end_frame=end_frame,
         video_width=video_width,
         video_height=video_height,
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def load_video_path_resolver() -> VideoPathResolver:
+    return VideoPathResolver.from_environment(PROJECT_ROOT)
+
+
+def match_video_path(match_key: str) -> Path:
+    """Low-quality processing video used for YOLO/calibration."""
+
+    return load_video_path_resolver().processing_path(match_key)
+
+
+def match_preview_video_path(match_key: str) -> Path:
+    """Full HD preview video when configured; otherwise falls back to processing video."""
+
+    return load_video_path_resolver().preview_path(match_key)
+
+
+def possession_to_preview_sequence(
+    possession: PossessionSequenceV2,
+    *,
+    sequence_id: str,
+    source: str,
+) -> AttackSequence:
+    """Legacy sequence used only for video window + conclusion UI."""
+
+    events = tuple(
+        Event(
+            timestamp=action.timestamp_sec,
+            event_type=action.action_type,
+            team=possession.possession_team_id,
+            x=action.x,
+            y=action.y,
+            outcome=action.outcome,
+            frame=action.frame,
+            player_id=action.actor_id,
+            jersey=action.jersey,
+            role=action.role,
+            confidence=action.action_probability if action.action_probability is not None else 1.0,
+            source=source,
+            evidence_id=action.action_id,
+        )
+        for action in possession.actions
+    )
+    if not events:
+        raise ValueError("sequence has no actions to preview")
+    start_sec = min(possession.start_sec, events[0].timestamp)
+    end_sec = max(possession.end_sec, events[-1].timestamp)
+    return AttackSequence(
+        attack_id=sequence_id,
+        team=possession.possession_team_id,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        events=events,
+        match_id=possession.match_id,
+        start_frame=possession.start_frame,
+        end_frame=possession.end_frame,
+        source=source,
     )
 
 
@@ -286,21 +453,14 @@ def render_attack(sequence: AttackSequence, bundle: EvidenceBundle, video_path: 
     event_rows = [item.to_dict() for item in sequence.events]
     st.subheader("Event timeline")
     st.dataframe(pd.DataFrame(event_rows), width="stretch", hide_index=True)
-
-    positioned_events = tuple(
-        item for item in sequence.events if item.x is not None and item.y is not None
+    show_event_pitch(
+        sequence.events,
+        heading="Bản đồ đợt tấn công" if assessment.is_attack else "Bản đồ chuỗi possession",
+        caption=(
+            "Sân mplsoccer 105 × 68 m, hướng tấn công từ trái sang phải. "
+            "Mỗi điểm có chú thích đầy đủ nội dung event."
+        ),
     )
-    if positioned_events:
-        st.subheader(
-            "Bản đồ đợt tấn công" if assessment.is_attack else "Bản đồ chuỗi possession"
-        )
-        st.caption(
-            "Tọa độ chuẩn hóa trên sân 105 × 68 m, hướng tấn công từ trái sang phải. "
-            "Đường mũi tên biểu diễn thứ tự event, không phải quỹ đạo chính xác của bóng."
-        )
-        pitch_figure = plot_attack_pitch(sequence)
-        st.pyplot(pitch_figure, width="stretch")
-        plt.close(pitch_figure)
 
     with st.expander("Dữ liệu đầu vào có cấu trúc (JSON, dành cho nghiên cứu)"):
         st.json(bundle.to_dict(), expanded=False)
@@ -313,11 +473,21 @@ def render_calibrated_window(
     video_path: Path,
     playbyplay_path: Path,
     tactical_path: Path,
+    video_resolver: VideoPathResolver | None = None,
 ) -> None:
     st.subheader("Phân tích video theo khung thời gian")
+    resolver = video_resolver or load_video_path_resolver()
+    dual_video = resolver.dual_video_enabled(match_key)
     st.caption(
         "Chọn một cửa sổ ngắn quanh chuỗi possession. YOLO chỉ chạy trong cửa sổ này; "
         "frame/timestamp vẫn giữ theo toàn trận để khớp event và tactical HDF5."
+        + (
+            f" Pipeline vision đọc `{video_path.name}` (video xử lý). "
+            "Preview sự kiện phía trên dùng Full HD từ "
+            f"`{resolver.preview_path(match_key).parent}`."
+            if dual_video
+            else ""
+        )
     )
     if not video_path.is_file() or not playbyplay_path.is_file() or not tactical_path.is_file():
         missing = []
@@ -387,7 +557,8 @@ def render_calibrated_window(
                         tactical_path.stat().st_mtime,
                     )
                 report = projector.report.to_dict()
-                if report["status"] != "pass":
+                can_run_yolo = int(report.get("valid_sampled_frames") or 0) > 0
+                if not can_run_yolo:
                     st.session_state[result_key] = {
                         "calibration": report,
                         "analysis_status": "skipped",
@@ -436,12 +607,22 @@ def render_calibrated_window(
                                 ),
                             },
                         )
-                        st.session_state[result_key] = persist_footpass_window_stream(
-                            window_manifest,
-                            sequence,
-                            start_sec=start_sec,
-                            end_sec=end_sec,
-                        )
+                        try:
+                            st.session_state[result_key] = persist_footpass_window_stream(
+                                window_manifest,
+                                sequence,
+                                start_sec=start_sec,
+                                end_sec=end_sec,
+                            )
+                        except Exception as persist_error:
+                            LOGGER.exception("Window stream persist failed after YOLO")
+                            window_manifest = dict(window_manifest)
+                            window_manifest["persist_warning"] = str(persist_error)
+                            st.session_state[result_key] = window_manifest
+                            st.warning(
+                                "YOLO đã chạy xong nhưng không lưu được PossessionCandidateV1: "
+                                f"{persist_error}"
+                            )
             except Exception as error:
                 LOGGER.exception("Calibrated FOOTPASS window failed")
                 st.error(f"Không thể phân tích cửa sổ đã chọn: {error}")
@@ -463,7 +644,7 @@ def render_calibrated_window(
         "Calibration", "PASS" if calibration_passed else "FAIL"
     )
     calibration_columns[1].metric(
-        "Frame coverage", f"{100 * float(calibration.get('projected_frame_coverage', 0)):.1f}%"
+        "Eligible coverage", f"{100 * float(calibration.get('projected_frame_coverage', 0)):.1f}%"
     )
     median_error = calibration.get("median_holdout_error_m")
     p90_error = calibration.get("p90_holdout_error_m")
@@ -481,19 +662,22 @@ def render_calibrated_window(
         calibration.get("extrapolated_frame_coverage", 0)
     )
     unsupported_frames = int(calibration.get("unsupported_frames", 0))
-    if any((direct_coverage, interpolated_coverage, extrapolated_coverage)):
+    ineligible_frames = int(calibration.get("ineligible_frames", 0))
+    eligible_frames = int(calibration.get("eligible_frames") or 0)
+    if any((direct_coverage, interpolated_coverage, extrapolated_coverage, ineligible_frames)):
         st.caption(
             f"Nguồn calibration: {direct_coverage:.1f}% fit trực tiếp qua holdout gate · "
             f"{interpolated_coverage:.1f}% nội suy giữa hai frame hợp lệ · "
             f"{extrapolated_coverage:.1f}% ngoại suy giới hạn · "
-            f"{unsupported_frames} frame không đủ bằng chứng."
+            f"{unsupported_frames} frame live không chiếu được · "
+            f"{ineligible_frames} frame replay/không bbox (loại khỏi quality gate"
+            + (f", còn {eligible_frames} frame đủ điều kiện" if eligible_frames else "")
+            + ")."
         )
 
     outputs = dict(manifest.get("outputs") or {})
     annotated_path = Path(str(outputs.get("annotated_video") or ""))
-    if annotated_path.is_file():
-        st.markdown("#### Video đã chiếu track lên tọa độ mặt sân")
-        st.video(str(annotated_path))
+    show_yolo_overlay(annotated_path, heading="Video YOLO đã xử lý trên sự kiện")
 
     quality = dict(manifest.get("quality") or {})
     if quality:
@@ -518,13 +702,20 @@ def render_calibrated_window(
     )
     stream_summary = dict(manifest.get("structured_event_stream") or {})
     legacy_gates = dict(stream_summary.get("quality_gates") or {})
-    st.markdown("#### PossessionCandidateV1 trong cửa sổ")
-    st.warning(
-        "Chuỗi này dùng hợp đồng V1 và luôn mang nhãn `legacy_unvalidated`. "
-        "Timeline thô được giữ để audit, nhưng không được chuyển thành AttackSequenceV2 "
-        "và không nhận xG/effectiveness verdict."
+    skip_reason = str(manifest.get("analysis_skip_reason") or "")
+    st.markdown("#### Overlay YOLO trên cửa sổ đã chọn")
+    st.caption(
+        "Attack-v2 đã được decode ở trên. Overlay này chiếu track YOLO bằng homography FOOTPASS "
+        "và không đổi hợp đồng v2, không gắn xG, không đưa effectiveness verdict."
     )
-    gate_columns = st.columns(5)
+    if skip_reason == "dynamic_calibration_quality_gate_failed":
+        st.error("Không có homography hợp lệ trong cửa sổ nên overlay YOLO bị bỏ qua.")
+    elif not calibration_passed:
+        st.info(
+            "Quality gate coverage trên frame đủ điều kiện chưa đạt 90%. "
+            "YOLO vẫn chạy trên các frame đã chiếu được; replay/thiếu bbox không tính vào gate."
+        )
+    gate_columns = st.columns(4)
     gate_columns[0].metric("Assisted calibration", "PASS" if calibration_passed else "FAIL")
     gate_columns[1].metric(
         "Window boundary",
@@ -534,16 +725,12 @@ def render_calibrated_window(
         "Terminal evidence",
         "PASS" if legacy_gates.get("terminal_evidence_complete") else "INCOMPLETE",
     )
-    gate_columns[3].metric(
-        "Attack-v2", "WITHHELD"
-    )
     cv_gates = dict(manifest.get("event_quality_gates") or {})
     cv_event_passed = bool(cv_gates) and all(cv_gates.values())
-    gate_columns[4].metric("xG/effectiveness", "WITHHELD")
+    gate_columns[3].metric("CV event gate", "PASS" if cv_event_passed else "ABSTAIN")
     st.caption(
-        "FOOTPASS action/tactical và YOLO hiện là hai nguồn song song. Chỉ source tier `fused` "
-        "với association và field-level provenance thật mới được phép kết hợp hai nguồn. "
-        f"CV-only event gate hiện tại: {'PASS' if cv_event_passed else 'ABSTAIN'}."
+        "FOOTPASS action/tactical và YOLO là hai nguồn song song. Chỉ source tier `fused` "
+        "với association và field-level provenance mới được phép kết hợp hai nguồn."
     )
 
     if window_events:
@@ -567,6 +754,14 @@ def render_calibrated_window(
                 }
             )
         st.dataframe(pd.DataFrame(timeline_rows), width="stretch", hide_index=True)
+        show_event_pitch(
+            window_events,
+            heading="Bản đồ event trong cửa sổ (mplsoccer)",
+            caption=(
+                "Mỗi điểm trên sân tương ứng một event trong cửa sổ, kèm chú thích đầy đủ "
+                "thời điểm, đội, cầu thủ, tọa độ, kết quả và độ tin cậy."
+            ),
+        )
     else:
         st.warning("Không có event của possession candidate đã chọn trong cửa sổ này.")
 
@@ -577,7 +772,11 @@ def render_calibrated_window(
             "thành xác suất hay dùng cho verdict; xG-v2 chỉ chạy sau terminal v2 đã xác nhận."
         )
 
-    with st.expander("Provenance kỹ thuật của cửa sổ"):
+    with st.expander("Sidecar V1 (chỉ để audit, không phải kết luận)"):
+        st.caption(
+            "Artifact cửa sổ vẫn được lưu như PossessionCandidateV1/`legacy_unvalidated` "
+            "để không trộn overlay YOLO vào AttackSequenceV2."
+        )
         st.json(
             {
                 "calibration": calibration,
@@ -600,8 +799,14 @@ ACTION_LABELS = {
     "drive": "Dẫn bóng",
     "carry": "Dẫn bóng",
     "pass": "Chuyền bóng",
+    "cross": "Tạt bóng",
     "header": "Đánh đầu",
+    "headed_attempt": "Đánh đầu về cầu môn",
     "shot": "Dứt điểm",
+    "shot_attempt": "Dứt điểm",
+    "block": "Chặn bóng",
+    "tackle": "Tắc bóng",
+    "throw_in": "Ném biên",
     "goal": "Bàn thắng",
     "turnover": "Mất bóng",
 }
@@ -831,49 +1036,59 @@ with analysis_tab:
         metric_columns[1].metric("Possessions", len(possessions_data))
         metric_columns[2].metric("Strict Attack-v2", len(attacks_data))
         metric_columns[3].metric("Replay excluded", summary.get("excluded_replay_actions", 0))
-        terminal_types = dict(summary.get("terminal_types") or {})
-        inference = dict(summary.get("terminal_inference") or {})
-        mix_columns = st.columns(4)
-        mix_columns[0].metric("shot_attempt terminals", terminal_types.get("shot_attempt", 0))
-        mix_columns[1].metric("headed_attempt terminals", terminal_types.get("headed_attempt", 0))
-        mix_columns[2].metric("forced_goal_line_out", terminal_types.get("forced_goal_line_out", 0))
-        mix_columns[3].metric(
-            "Headers promoted",
-            f"{inference.get('headed_promoted', 0)} / {inference.get('headed_promoted', 0) + inference.get('headers_left_generic', 0)}",
-        )
-        st.caption(
-            f"Source tier: `{source_tier}` · complete attack invariant: "
-            f"{summary.get('complete_attack_terminal_invariant', False)}. "
-            "Headline counts are Attack-v2 possessions/attacks. V1 candidates stay in the ablation expander. "
-            "FOOTPASS action and oracle tactical are assisted evidence, not video-only fusion."
-        )
+        st.caption(f"Source tier: `{source_tier}`")
 
-        view = st.radio(
-            "Sequence view",
-            ("Confirmed Attack-v2", "All possessions"),
+        gold_index = load_gold_outcome_index()
+        observed_actions_data = tuple(analysis_data.get("observed_actions", ()))
+        excluded_replay_ids = tuple(analysis_data.get("excluded_replay_action_ids", ()))
+        shot_insights = build_shot_insights(
+            observed_actions_data,
+            possessions_data,
+            attacks_data,
+            excluded_replay_action_ids=excluded_replay_ids,
+            gold_index=gold_index,
+        )
+        with st.expander("Audit shot → Attack-v2", expanded=False):
+            render_shot_promotion_audit(shot_insights)
+
+        sequence_filter = st.radio(
+            "Sequence filter",
+            (
+                SEQUENCE_FILTER_CONFIRMED,
+                SEQUENCE_FILTER_CENSORED_SHOT,
+                SEQUENCE_FILTER_ALL_POSSESSIONS,
+            ),
             horizontal=True,
         )
-        selected_values: tuple[tuple[str, dict[str, object]], ...]
-        if view == "Confirmed Attack-v2" and attacks_data:
-            selected_values = tuple(("attack", item) for item in attacks_data)
-        else:
-            if view == "Confirmed Attack-v2":
-                st.warning(
-                    "Không có terminal allowlist hoàn chỉnh ở operating point này; hiển thị possession."
-                )
-            selected_values = tuple(("possession", item) for item in possessions_data)
+        selected_values = filter_sequence_entries(
+            sequence_filter=sequence_filter,
+            possessions=possessions_data,
+            attacks=attacks_data,
+            censored_possession_ids=shot_insights.censored_possession_ids,
+        )
+        if sequence_filter == SEQUENCE_FILTER_CONFIRMED and not selected_values:
+            st.warning(
+                "Không có terminal allowlist hoàn chỉnh ở operating point này; thử filter khác."
+            )
+        elif sequence_filter == SEQUENCE_FILTER_CENSORED_SHOT and not selected_values:
+            st.info("Không có possession shot terminal bị censor trong hiệp này.")
 
         if selected_values:
             def v2_sequence_label(index: int) -> str:
                 kind, item = selected_values[index]
-                possession = item["possession"] if kind == "attack" else item
-                terminal = possession.get("terminal") or {}
-                terminal_name = terminal.get("terminal_type", "no terminal")
-                identifier = item.get("attack_id") if kind == "attack" else possession.get("possession_id")
+                possession_dict = item["possession"] if kind == "attack" else item
+                possession = PossessionSequenceV2.from_dict(possession_dict)
+                terminal = possession.terminal
+                terminal_name = terminal.terminal_type.value if terminal is not None else "no terminal"
+                identifier = item.get("attack_id") if kind == "attack" else possession.possession_id
+                shot_outcome, _ = resolve_shot_outcome(possession, gold_index=gold_index)
+                outcome_suffix = (
+                    f" · {format_shot_outcome(shot_outcome)}" if shot_outcome else ""
+                )
                 return (
-                    f"{'ATTACK' if kind == 'attack' else possession.get('status', 'possession').upper()} · "
-                    f"{identifier} · {possession['start_sec']:.1f}-{possession['end_sec']:.1f}s · "
-                    f"{terminal_name}"
+                    f"{'ATTACK' if kind == 'attack' else possession.status.value.upper()} · "
+                    f"{identifier} · {possession.start_sec:.1f}-{possession.end_sec:.1f}s · "
+                    f"{terminal_name}{outcome_suffix}"
                 )
 
             selected_index = st.selectbox(
@@ -893,7 +1108,11 @@ with analysis_tab:
                 else PossessionSequenceV2.from_dict(selected_payload)
             )
             terminal = possession_v2.terminal
-            detail_columns = st.columns(5)
+            shot_outcome, shot_outcome_source = resolve_shot_outcome(
+                possession_v2,
+                gold_index=gold_index,
+            )
+            detail_columns = st.columns(6)
             detail_columns[0].metric("Status", possession_v2.status.value)
             detail_columns[1].metric("Stable team", possession_v2.possession_team_id)
             detail_columns[2].metric("Actions", len(possession_v2.actions))
@@ -901,12 +1120,16 @@ with analysis_tab:
             detail_columns[4].metric(
                 "Terminal", terminal.terminal_type.value if terminal is not None else "unknown"
             )
+            detail_columns[5].metric("Shot outcome", format_shot_outcome(shot_outcome))
+            if shot_outcome_source:
+                st.caption(f"Outcome source: `{shot_outcome_source}`")
 
             timeline_rows = [
                 {
                     "Frame": action.frame,
                     "Time": round(action.timestamp_sec, 2),
                     "Action": ACTION_LABELS.get(action.action_type, action.action_type),
+                    "Outcome": action.outcome or "—",
                     "Actor team": action.actor_team_id or "unknown",
                     "Possession team": action.possession_team_id or "unknown",
                     "Jersey": action.jersey,
@@ -918,25 +1141,140 @@ with analysis_tab:
                 for action in possession_v2.actions
             ]
             st.dataframe(pd.DataFrame(timeline_rows), width="stretch", hide_index=True)
+            pitch_actions = actions_with_resolved_outcome(
+                possession_v2,
+                shot_outcome=shot_outcome,
+                outcome_source=shot_outcome_source,
+            )
+            show_event_pitch(
+                pitch_actions,
+                heading="Bản đồ event trên sân (mplsoccer)",
+                caption=(
+                    "Tọa độ chuẩn hóa 105 × 68 m. Mỗi điểm là một ObservedActionV2 với chú thích "
+                    "đầy đủ loại hành động, thời điểm, cầu thủ, kết quả (gold/terminal/action), "
+                    "xác suất và provenance."
+                ),
+            )
+
+            video_resolver = load_video_path_resolver()
+            processing_video_path = video_resolver.processing_path(match_key)
+            preview_video_path = video_resolver.preview_path(match_key)
+            preview_sequence = possession_to_preview_sequence(
+                possession_v2,
+                sequence_id=(
+                    attack_v2.attack_id
+                    if attack_v2 is not None
+                    else possession_v2.possession_id
+                ),
+                source=f"footpass_{mode}",
+            )
+            st.markdown("#### Preview video sự kiện")
+            if video_resolver.dual_video_enabled(match_key):
+                st.caption(
+                    "Preview Full HD · YOLO/calibration vẫn chạy trên video chất lượng thấp "
+                    f"({processing_video_path.name}). Mapping thời gian: "
+                    f"`{video_resolver.sync_path or 'offset mặc định 0s'}`."
+                )
+            preview_start_sec = video_resolver.match_sec_to_preview_sec(
+                match_key,
+                possession_v2.start_sec,
+            )
+            if preview_video_path.is_file():
+                st.video(str(preview_video_path), start_time=max(0, int(preview_start_sec)))
+                st.caption(
+                    video_resolver.describe_preview(
+                        match_key,
+                        start_sec=possession_v2.start_sec,
+                        end_sec=possession_v2.end_sec,
+                    )
+                )
+            else:
+                st.warning(f"Không tìm thấy video preview: {preview_video_path}")
+
+            render_calibrated_window(
+                preview_sequence,
+                match_key=match_key,
+                video_path=processing_video_path,
+                playbyplay_path=playbyplay,
+                tactical_path=tactical,
+                video_resolver=video_resolver,
+            )
+
+            conclusion_key = f"conclusion_{preview_sequence.attack_id}"
+            if openai_api_key_configured():
+                st.caption(f"Kết luận LLM dùng `{openai_model()}` (model rẻ nhất trong allowlist dự án).")
+            if st.button("Đưa ra kết luận", type="primary", key=f"conclude_{preview_sequence.attack_id}"):
+                if attack_v2 is None:
+                    st.session_state[conclusion_key] = {
+                        "overview": None,
+                        "verdict": insufficient_evidence_verdict(
+                            possession_v2.possession_id,
+                            (
+                                "Chuỗi này chưa phải Attack-v2 (thiếu terminal shot/header/block hợp lệ).",
+                            ),
+                        ),
+                        "bundle": None,
+                        "sequence": preview_sequence,
+                    }
+                else:
+                    overview = attack_v2_research_overview(attack_v2)
+                    bundle = build_bundle(preview_sequence, tactical_ready=tactical.exists())
+                    tools = EvidenceToolRegistry({preview_sequence.attack_id: bundle})
+                    try:
+                        if openai_api_key_configured():
+                            client: DeterministicEvidenceClient | OpenAIResponsesClient = (
+                                OpenAIResponsesClient(
+                                    model=openai_model(),
+                                    project_root=PROJECT_ROOT,
+                                    response_language="Vietnamese",
+                                )
+                            )
+                        else:
+                            client = DeterministicEvidenceClient()
+                        verdict = client.evaluate(bundle, tools)
+                    except Exception as error:
+                        LOGGER.exception("Conclusion evaluation failed")
+                        st.error(describe_openai_error(error) if openai_api_key_configured() else str(error))
+                        verdict = DeterministicEvidenceClient().evaluate(bundle, tools)
+                    st.session_state[conclusion_key] = {
+                        "overview": overview,
+                        "verdict": verdict,
+                        "bundle": bundle,
+                        "sequence": preview_sequence,
+                    }
+
+            conclusion = st.session_state.get(conclusion_key)
+            if conclusion:
+                overview = conclusion.get("overview")
+                if isinstance(overview, dict):
+                    st.markdown("#### Tóm tắt Attack-v2")
+                    summary_cols = st.columns(4)
+                    summary_cols[0].metric("Terminal", str(overview.get("terminal_type") or "—"))
+                    summary_cols[1].metric("xG", overview.get("xg_status", "unknown"))
+                    summary_cols[2].metric(
+                        "Thời lượng",
+                        f"{float(overview.get('duration_sec') or 0):.1f}s",
+                    )
+                    summary_cols[3].metric("Actions", int(overview.get("action_count") or 0))
+                verdict = conclusion.get("verdict")
+                bundle = conclusion.get("bundle")
+                sequence = conclusion.get("sequence")
+                if verdict is not None and bundle is not None and sequence is not None:
+                    render_verdict(verdict, bundle, sequence)
+                elif verdict is not None:
+                    label, icon = VERDICT_LABELS[verdict.label]
+                    st.markdown(f"### {icon} Kết luận: {label}")
+                    for limitation in verdict.limitations:
+                        st.write(f"• {limitation}")
 
             if attack_v2 is not None:
                 st.success(
                     "Confirmed Attack-v2: possession complete và kết thúc bằng terminal allowlist."
                 )
-                quality_columns = st.columns(3)
-                quality_columns[0].metric("Chance quality", "unknown (xG-v2 withheld)")
-                quality_columns[1].metric(
-                    "Realized outcome",
-                    terminal.outcome if terminal is not None and terminal.outcome else "unknown",
-                )
-                quality_columns[2].metric("Tactical quality", "not trained")
-                st.info(
-                    "Không phát categorical effectiveness verdict: cần ≥300 confirmed labelled attacks "
-                    "và model tactical-quality phải vượt acceptance gate."
-                )
             else:
                 st.info(
-                    "Đây là possession/threat research-only, không phải attack; xG và effectiveness verdict bị cấm."
+                    "Đây là possession/threat research-only, không phải attack; "
+                    "kết luận hiệu quả bị giữ lại cho tới khi có terminal hợp lệ."
                 )
 
             with st.expander("Field-level provenance và state transitions"):
@@ -1060,9 +1398,7 @@ with upload_tab:
         if manifest:
             outputs = manifest.get("outputs", {})
             annotated_path = Path(str(outputs.get("annotated_video", "")))
-            if annotated_path.is_file():
-                st.markdown("#### Video sau khi chạy YOLO")
-                st.video(str(annotated_path))
+            show_yolo_overlay(annotated_path, heading="Video sau khi chạy YOLO")
             quality = manifest.get("quality", {})
             quality_columns = st.columns(4)
             quality_columns[0].metric("Quality score", f"{quality.get('quality_score', 0):.1f}/100")

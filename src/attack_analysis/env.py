@@ -16,3 +16,13 @@ def load_project_environment(project_root: Path) -> bool:
 
 def openai_api_key_configured() -> bool:
     return bool(os.environ.get("OPENAI_API_KEY", "").strip())
+
+
+# Cheapest allowed model on this project's OpenAI allowlist that still supports
+# Responses API tool-calling for the conclusion step.
+DEFAULT_OPENAI_MODEL = "gpt-5.4-nano"
+
+
+def openai_model() -> str:
+    configured = os.environ.get("OPENAI_MODEL", "").strip()
+    return configured or DEFAULT_OPENAI_MODEL

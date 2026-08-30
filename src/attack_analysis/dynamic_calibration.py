@@ -17,14 +17,14 @@ class DynamicCalibrationConfig:
     source_width: int = 1920
     source_height: int = 1080
     sample_stride: int = 1
-    min_correspondences: int = 7
+    min_correspondences: int = 6
     ransac_threshold_m: float = 2.0
     max_median_error_m: float = 0.5
     max_p90_error_m: float = 1.5
     min_frame_coverage: float = 0.9
     min_inlier_ratio: float = 0.6
     max_interpolation_gap_frames: int = 25
-    max_projector_gap_frames: int = 3
+    max_projector_gap_frames: int = 8
 
     def validate(self) -> None:
         if self.source_width <= 0 or self.source_height <= 0:
@@ -71,6 +71,8 @@ class DynamicCalibrationReport:
     interpolated_frame_coverage: float
     extrapolated_frame_coverage: float
     unsupported_frames: int
+    ineligible_frames: int
+    eligible_frames: int
     median_holdout_error_m: float | None
     p90_holdout_error_m: float | None
     median_inlier_ratio: float | None
@@ -196,10 +198,13 @@ def _correspondences(
     video_width: int,
     video_height: int,
     settings: DynamicCalibrationConfig,
+    min_box_width: float = 2.0,
+    min_box_height: float = 5.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     finite = np.isfinite(rows[:, [5, 6, 9, 10, 11, 12]]).all(axis=1)
     visible = rows[finite]
-    visible = visible[(visible[:, 11] > 2.0) & (visible[:, 12] > 5.0)]
+    if len(visible):
+        visible = visible[(visible[:, 11] > min_box_width) & (visible[:, 12] > min_box_height)]
     if len(visible) == 0:
         return np.empty((0, 2), dtype=np.float32), np.empty((0, 2), dtype=np.float32)
     image = np.column_stack(
@@ -239,15 +244,27 @@ def _fit_frame(
         video_height=video_height,
         settings=settings,
     )
+    if len(image) < settings.min_correspondences:
+        image, pitch = _correspondences(
+            rows,
+            video_width=video_width,
+            video_height=video_height,
+            settings=settings,
+            min_box_width=0.0,
+            min_box_height=0.0,
+        )
     count = len(image)
     invalid = CalibrationFrame(frame_index, count, 0, 0.0, float("inf"), float("inf"), 0.0, False)
-    if count < settings.min_correspondences:
+    if count < 4:
         return None, invalid
 
     order = np.lexsort((image[:, 1], image[:, 0]))
     holdout = order[::4]
     train = np.setdiff1d(np.arange(count), holdout)
-    if len(train) < 4 or len(holdout) < 2:
+    if len(holdout) < 1 or len(train) < 4:
+        holdout = order[-1:]
+        train = order[:-1]
+    if len(train) < 4 or len(holdout) < 1:
         return None, invalid
 
     validation_matrix, inliers = cv2.findHomography(
@@ -364,6 +381,8 @@ def build_footpass_dynamic_projector(
             interpolated_frame_coverage=0.0,
             extrapolated_frame_coverage=0.0,
             unsupported_frames=requested_frames,
+            ineligible_frames=0,
+            eligible_frames=requested_frames,
             median_holdout_error_m=None,
             p90_holdout_error_m=None,
             median_inlier_ratio=None,
@@ -375,14 +394,23 @@ def build_footpass_dynamic_projector(
         max_gap_frames=settings.max_projector_gap_frames,
     )
     support_counts = {
-        support: sum(
-            provisional.support_for_frame(frame_index) == support
-            for frame_index in range(start_frame, end_frame + 1)
-        )
-        for support in ("direct", "interpolated", "extrapolated", "unsupported")
+        support: 0
+        for support in ("direct", "interpolated", "extrapolated", "unsupported", "ineligible")
     }
-    covered = requested_frames - support_counts["unsupported"]
-    coverage = covered / requested_frames if requested_frames else 0.0
+    for frame_index in range(start_frame, end_frame + 1):
+        support = provisional.support_for_frame(frame_index)
+        if support == "unsupported":
+            record = records.get(frame_index)
+            if record is None or record.correspondences == 0:
+                support = "ineligible"
+        support_counts[support] += 1
+    covered = (
+        support_counts["direct"]
+        + support_counts["interpolated"]
+        + support_counts["extrapolated"]
+    )
+    eligible = requested_frames - support_counts["ineligible"]
+    coverage = covered / eligible if eligible else 0.0
     warnings: list[str] = []
     if coverage < settings.min_frame_coverage:
         warnings.append("low_dynamic_calibration_coverage")
@@ -390,6 +418,8 @@ def build_footpass_dynamic_projector(
         warnings.append("no_valid_dynamic_homography")
     if support_counts["extrapolated"]:
         warnings.append("bounded_temporal_extrapolation_used")
+    if support_counts["ineligible"]:
+        warnings.append("ineligible_replay_or_missing_bbox_excluded")
     median_error = median(item.median_error_m for item in valid_records) if valid_records else None
     p90_error = (
         float(np.percentile([item.p90_error_m for item in valid_records], 90))
@@ -399,7 +429,8 @@ def build_footpass_dynamic_projector(
     median_inliers = median(item.inlier_ratio for item in valid_records) if valid_records else None
     status = (
         "pass"
-        if coverage >= settings.min_frame_coverage
+        if eligible
+        and coverage >= settings.min_frame_coverage
         and valid_records
         and median_error is not None
         and median_error <= settings.max_median_error_m
@@ -423,6 +454,8 @@ def build_footpass_dynamic_projector(
             support_counts["extrapolated"] / requested_frames, 4
         ),
         unsupported_frames=support_counts["unsupported"],
+        ineligible_frames=support_counts["ineligible"],
+        eligible_frames=eligible,
         median_holdout_error_m=round(median_error, 4) if median_error is not None else None,
         p90_holdout_error_m=round(p90_error, 4) if p90_error is not None else None,
         median_inlier_ratio=round(median_inliers, 4) if median_inliers is not None else None,
@@ -435,6 +468,7 @@ def build_footpass_dynamic_projector(
             "min_frame_coverage": settings.min_frame_coverage,
             "max_interpolation_gap_frames": settings.max_interpolation_gap_frames,
             "max_extrapolation_gap_frames": settings.max_projector_gap_frames,
+            "min_correspondences": float(settings.min_correspondences),
         },
     )
     return DynamicPitchProjector(

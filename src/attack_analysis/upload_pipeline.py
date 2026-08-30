@@ -21,7 +21,7 @@ from .provenance import (
 from .vision_pipeline import VisionConfig
 
 
-VISION_CACHE_SCHEMA = "upload-vision-v3"
+VISION_CACHE_SCHEMA = "upload-vision-v4"
 
 
 def _model_fingerprints(

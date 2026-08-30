@@ -16,6 +16,7 @@ class DynamicCalibrationTests(unittest.TestCase):
         self.assertEqual(config.max_median_error_m, 0.5)
         self.assertEqual(config.max_p90_error_m, 1.5)
         self.assertEqual(config.min_frame_coverage, 0.9)
+        self.assertEqual(config.min_correspondences, 6)
 
     def test_builds_frame_varying_projector_with_holdout_metrics(self) -> None:
         try:
@@ -152,8 +153,64 @@ class DynamicCalibrationTests(unittest.TestCase):
                     max_projector_gap_frames=0,
                 ),
             )
-            self.assertEqual(strict.report.status, "fail")
+            self.assertEqual(strict.report.status, "pass")
+            self.assertEqual(strict.report.ineligible_frames, 4)
             self.assertEqual(strict.support_for_frame(105), "unsupported")
+            self.assertIsNone(strict.for_frame(105))
+
+    def test_replay_holes_are_excluded_from_coverage_gate(self) -> None:
+        try:
+            import h5py
+            import cv2  # noqa: F401
+        except ImportError:
+            self.skipTest("dynamic calibration extras are not installed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tactical.h5"
+            pitch_points = [
+                (12, 8),
+                (28, 15),
+                (48, 10),
+                (72, 22),
+                (90, 14),
+                (30, 52),
+                (78, 55),
+            ]
+            rows = []
+            for frame in range(100, 151):
+                for player_id, (pitch_x, pitch_y) in enumerate(pitch_points, start=1):
+                    row = np.zeros(14, dtype=np.float32)
+                    row[0] = frame
+                    row[1] = player_id
+                    row[5] = pitch_x / 105.0
+                    row[6] = pitch_y / 68.0
+                    if 110 <= frame <= 139:
+                        row[9:13] = np.nan
+                    else:
+                        image_x = 70.0 + 4.3 * pitch_x
+                        image_bottom = 30.0 + 4.1 * pitch_y
+                        row[9] = image_x * 3.0 - 15.0
+                        row[10] = image_bottom * 1080.0 / 352.0 - 60.0
+                        row[11] = 30.0
+                        row[12] = 60.0
+                    rows.append(row)
+            with h5py.File(path, "w") as handle:
+                handle.create_dataset("game_1_H1", data=np.asarray(rows))
+
+            dynamic = build_footpass_dynamic_projector(
+                path,
+                "game_1_H1",
+                start_frame=100,
+                end_frame=150,
+                video_width=640,
+                video_height=352,
+            )
+            self.assertEqual(dynamic.report.status, "pass")
+            self.assertGreaterEqual(dynamic.report.ineligible_frames, 10)
+            self.assertGreaterEqual(dynamic.report.projected_frame_coverage, 0.9)
+            self.assertIsNone(dynamic.for_frame(125))
+            self.assertIsNotNone(dynamic.for_frame(105))
+            self.assertIsNotNone(dynamic.for_frame(145))
 
     def test_rejects_invalid_frame_window(self) -> None:
         with self.assertRaises(ValueError):
