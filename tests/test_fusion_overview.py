@@ -65,6 +65,56 @@ class FusionAndOverviewTests(unittest.TestCase):
         self.assertEqual(association.xg_raw["goalkeeper_visible"], True)
         self.assertEqual(association.xg_raw["foe_players"], 2)
 
+    def test_infers_goalkeeper_body_part_and_play_pattern(self) -> None:
+        throw_in = _action(1.0, "throw_in", "A", x=70.0)
+        shot = _action(3.0, "shot", "A", x=90.0)
+        keypoints = [(0.0, 0.0, 0.0)] * 17
+        keypoints[0] = (12.0, 10.0, 0.9)
+        keypoints[16] = (20.0, 48.0, 0.9)
+        shooter = TrackedObject(
+            track_id="a1",
+            object_type="player",
+            confidence=0.9,
+            bbox=BoundingBox(10, 10, 40, 50),
+            team="team_a",
+            pitch_x=90.2,
+            pitch_y=34.1,
+            keypoints=tuple(tuple(value) for value in keypoints),
+        )
+        frame = FrameObservation(
+            frame_index=75,
+            timestamp_sec=3.0,
+            objects=(
+                shooter,
+                TrackedObject(
+                    track_id="b1",
+                    object_type="player",
+                    confidence=0.9,
+                    bbox=BoundingBox(80, 10, 100, 50),
+                    team="team_b",
+                    pitch_x=102.0,
+                    pitch_y=34.0,
+                ),
+                TrackedObject(
+                    track_id="ball",
+                    object_type="ball",
+                    confidence=0.8,
+                    bbox=BoundingBox(18, 44, 26, 52),
+                ),
+            ),
+        )
+        association = associate_action_with_frame(
+            shot,
+            frame,
+            team_mapping={"A": "team_a"},
+            possession_actions=(throw_in, shot),
+        )
+        self.assertEqual(association.xg_raw["body_part"], "right_foot")
+        self.assertEqual(association.xg_raw["play_pattern"], "throw_in")
+        self.assertEqual(association.xg_raw["shot_type"], "open_play")
+        self.assertTrue(association.xg_raw["goalkeeper_visible"])
+        self.assertAlmostEqual(association.xg_raw["x_goalkeeper"], 102.0)
+
     def test_bbox_iou_and_ball_gate_withhold_xg(self) -> None:
         self.assertGreater(
             bbox_iou(BoundingBox(0, 0, 10, 10), BoundingBox(5, 5, 15, 15)),

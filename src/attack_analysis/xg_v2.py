@@ -173,6 +173,8 @@ def _body_part_category(value: object | None) -> str:
         return "left_foot"
     if label in {"head", "headed", "header"}:
         return "head"
+    if label in {"foot", "feet", "boot"}:
+        return "right_foot"
     return "other"
 
 

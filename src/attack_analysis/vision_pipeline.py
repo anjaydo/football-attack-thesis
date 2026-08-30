@@ -165,7 +165,7 @@ def _match_keypoints(
     pose_boxes: Any,
     pose_keypoints: Any,
     used_pose_indexes: set[int],
-    minimum_iou: float = 0.25,
+    minimum_iou: float = 0.12,
 ) -> Any | None:
     if pose_keypoints is None:
         return None
@@ -209,6 +209,36 @@ def _player_anchor(box: Any, keypoints: Any | None, threshold: float) -> Point:
             )
     x1, _, x2, y2 = map(float, box)
     return (x1 + x2) / 2.0, y2
+
+
+def _goalkeeper_track_ids(
+    player_items: list[tuple[int, Any, int | None, Any | None, Point, Point | None, str | None]],
+) -> set[str]:
+    located = [
+        (str(track_id), team, pitch)
+        for _index, _box, track_id, _keypoints, _anchor, pitch, team in player_items
+        if track_id is not None and pitch is not None
+    ]
+    if not located:
+        return set()
+    keepers: set[str] = set()
+    by_team: dict[str, list[tuple[str, Point]]] = {}
+    unlabelled: list[tuple[str, Point]] = []
+    for track_id, team, pitch in located:
+        if team:
+            by_team.setdefault(team, []).append((track_id, pitch))
+        else:
+            unlabelled.append((track_id, pitch))
+    groups = list(by_team.values())
+    if not groups and unlabelled:
+        groups = [unlabelled]
+    for members in groups:
+        median_x = sorted(pitch[0] for _track, pitch in members)[len(members) // 2]
+        own_goal = 0.0 if median_x < PITCH_LENGTH / 2.0 else PITCH_LENGTH
+        track_id, pitch = min(members, key=lambda item: abs(item[1][0] - own_goal))
+        if abs(pitch[0] - own_goal) <= 18.0:
+            keepers.add(track_id)
+    return keepers
 
 
 def _speed_label(speed_per_sec: float, calibrated: bool) -> str:
@@ -367,13 +397,14 @@ def annotate_video(
                 if field_geometry is not None and len(field_geometry.pitch_polygon) >= 3
                 else None
             )
-            player_roi = roi or automatic_roi
-            ball_roi = player_roi if settings.filter_ball_by_roi else None
+            player_roi = roi
+            ball_roi = (roi or automatic_roi) if settings.filter_ball_by_roi else None
+            pose_confidence = max(0.08, settings.player_confidence - 0.08)
 
             pose_result = pose_model.predict(
                 frame,
                 classes=[COCO_PERSON_CLASS],
-                conf=settings.player_confidence,
+                conf=pose_confidence,
                 imgsz=settings.image_size,
                 device=settings.device,
                 verbose=False,
@@ -440,8 +471,17 @@ def annotate_video(
                 "team_b": (255, 170, 60),
                 None: (180, 180, 180),
             }
+            located_items: list[
+                tuple[int, Any, int | None, Any | None, Point, Point | None, str | None]
+            ] = []
             for index, box, track_id, keypoints, anchor in player_items:
                 pitch_position = _project_on_pitch(frame_projector, anchor)
+                team = team_labels.get(str(track_id)) if track_id is not None else None
+                located_items.append(
+                    (index, box, track_id, keypoints, anchor, pitch_position, team)
+                )
+            keeper_ids = _goalkeeper_track_ids(located_items)
+            for index, box, track_id, keypoints, anchor, pitch_position, team in located_items:
                 calibrated = pitch_position is not None
                 velocity = 0.0
                 if track_id is not None:
@@ -451,7 +491,11 @@ def annotate_video(
                         pitch_position or anchor,
                         timestamp_sec,
                     )
-                team = team_labels.get(str(track_id)) if track_id is not None else None
+                object_type = (
+                    "goalkeeper"
+                    if track_id is not None and str(track_id) in keeper_ids
+                    else "player"
+                )
                 color = team_colors[team]
                 x1, y1, x2, y2 = map(int, box)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
@@ -461,7 +505,7 @@ def annotate_video(
                     cv2,
                     frame,
                     (x1, y1),
-                    f"player {team_text} #{identity} | {_speed_label(velocity, calibrated)}",
+                    f"{object_type} {team_text} #{identity} | {_speed_label(velocity, calibrated)}",
                     color,
                 )
                 if keypoints is not None:
@@ -470,7 +514,7 @@ def annotate_video(
                     )
                 player_data: dict[str, object] = {
                     "track_id": str(track_id) if track_id is not None else None,
-                    "object_type": "player",
+                    "object_type": object_type,
                     "confidence": float(player_confidences[index]),
                     "bbox": {
                         "x1": float(box[0]),

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from bisect import bisect_left
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from statistics import median
 from typing import Any, Iterable
@@ -219,6 +219,166 @@ def _correspondences(
     return image, pitch
 
 
+def _bbox_extents(rows: Any) -> tuple[float, float] | None:
+    if len(rows) == 0:
+        return None
+    finite = np.isfinite(rows[:, [9, 10, 11, 12]]).all(axis=1)
+    visible = rows[finite]
+    if len(visible) == 0:
+        return None
+    rights = visible[:, 9] + visible[:, 11]
+    bottoms = visible[:, 10] + visible[:, 12]
+    return float(np.percentile(rights, 98)), float(np.percentile(bottoms, 98))
+
+
+def candidate_bbox_source_sizes(
+    rows: Any,
+    *,
+    video_width: int,
+    video_height: int,
+    settings: DynamicCalibrationConfig,
+) -> tuple[tuple[int, int], ...]:
+    """FOOTPASS bboxes may be Full HD, processing-res, or normalized 0–1."""
+
+    candidates: set[tuple[int, int]] = {
+        (settings.source_width, settings.source_height),
+        (video_width, video_height),
+    }
+    extents = _bbox_extents(rows)
+    if extents is not None:
+        max_x, max_y = extents
+        if 0.4 <= max_x <= 2.5 and 0.4 <= max_y <= 2.5:
+            candidates.add((1, 1))
+        else:
+            for width, height in (
+                (1920, 1080),
+                (1280, 720),
+                (1280, 736),
+                (960, 540),
+                (854, 480),
+                (640, 360),
+                (640, 352),
+            ):
+                if abs(max_x - width) / width <= 0.35:
+                    candidates.add((width, height))
+    return tuple(sorted(candidates))
+
+
+def _fit_window(
+    rows: Any,
+    *,
+    start_frame: int,
+    video_width: int,
+    video_height: int,
+    settings: DynamicCalibrationConfig,
+) -> tuple[dict[int, PitchProjector], dict[int, CalibrationFrame]]:
+    projectors: dict[int, PitchProjector] = {}
+    records: dict[int, CalibrationFrame] = {}
+    for frame_index, frame_rows in _frame_groups(rows):
+        if (frame_index - start_frame) % settings.sample_stride:
+            continue
+        projector, record = _fit_frame(
+            frame_index,
+            frame_rows,
+            video_width=video_width,
+            video_height=video_height,
+            settings=settings,
+        )
+        records[frame_index] = record
+        if projector is not None:
+            projectors[frame_index] = projector
+    return projectors, records
+
+
+def _in_frame_ratio(
+    rows: Any,
+    *,
+    video_width: int,
+    video_height: int,
+    settings: DynamicCalibrationConfig,
+) -> float:
+    image, _pitch = _correspondences(
+        rows,
+        video_width=video_width,
+        video_height=video_height,
+        settings=settings,
+        min_box_width=0.0,
+        min_box_height=0.0,
+    )
+    if len(image) == 0:
+        return 0.0
+    inside = (
+        (image[:, 0] >= -40)
+        & (image[:, 0] <= video_width + 40)
+        & (image[:, 1] >= -40)
+        & (image[:, 1] <= video_height + 40)
+    )
+    return float(np.mean(inside))
+
+
+def _source_score(
+    records: dict[int, CalibrationFrame],
+    *,
+    in_frame: float,
+) -> tuple[float, int, float]:
+    valid = [item for item in records.values() if item.valid]
+    error = median(item.median_error_m for item in valid) if valid else float("inf")
+    return (in_frame, len(valid), -error)
+
+
+def select_bbox_source_size(
+    rows: Any,
+    *,
+    start_frame: int,
+    video_width: int,
+    video_height: int,
+    settings: DynamicCalibrationConfig,
+) -> DynamicCalibrationConfig:
+    candidates = candidate_bbox_source_sizes(
+        rows,
+        video_width=video_width,
+        video_height=video_height,
+        settings=settings,
+    )
+    if len(candidates) <= 1:
+        return settings
+    span = max(1, int(rows[-1, 0] - rows[0, 0]) + 1) if len(rows) else 1
+    probe_stride = max(settings.sample_stride, max(1, span // 25))
+    best_settings = settings
+    best_score: tuple[float, int, float] | None = None
+    for source_width, source_height in candidates:
+        probe = replace(
+            settings,
+            source_width=source_width,
+            source_height=source_height,
+            sample_stride=probe_stride,
+        )
+        _projectors, records = _fit_window(
+            rows,
+            start_frame=start_frame,
+            video_width=video_width,
+            video_height=video_height,
+            settings=probe,
+        )
+        score = _source_score(
+            records,
+            in_frame=_in_frame_ratio(
+                rows,
+                video_width=video_width,
+                video_height=video_height,
+                settings=probe,
+            ),
+        )
+        if best_score is None or score > best_score:
+            best_score = score
+            best_settings = replace(
+                settings,
+                source_width=source_width,
+                source_height=source_height,
+            )
+    return best_settings
+
+
 def _project_points(matrix: np.ndarray, points: np.ndarray) -> np.ndarray:
     homogeneous = np.column_stack((points, np.ones(len(points), dtype=np.float32)))
     transformed = homogeneous @ matrix.T
@@ -348,21 +508,21 @@ def build_footpass_dynamic_projector(
     if video_width <= 0 or video_height <= 0:
         raise ValueError("video dimensions must be positive")
     rows = _load_window_rows(tactical_h5, match_key, start_frame, end_frame)
-    projectors: dict[int, PitchProjector] = {}
-    records: dict[int, CalibrationFrame] = {}
-    for frame_index, frame_rows in _frame_groups(rows):
-        if (frame_index - start_frame) % settings.sample_stride:
-            continue
-        projector, record = _fit_frame(
-            frame_index,
-            frame_rows,
+    if len(rows):
+        settings = select_bbox_source_size(
+            rows,
+            start_frame=start_frame,
             video_width=video_width,
             video_height=video_height,
             settings=settings,
         )
-        records[frame_index] = record
-        if projector is not None:
-            projectors[frame_index] = projector
+    projectors, records = _fit_window(
+        rows,
+        start_frame=start_frame,
+        video_width=video_width,
+        video_height=video_height,
+        settings=settings,
+    )
 
     valid_records = [records[index] for index in projectors]
     requested_frames = end_frame - start_frame + 1
@@ -416,6 +576,8 @@ def build_footpass_dynamic_projector(
         warnings.append("low_dynamic_calibration_coverage")
     if not valid_records:
         warnings.append("no_valid_dynamic_homography")
+    if (settings.source_width, settings.source_height) != (1920, 1080):
+        warnings.append("bbox_source_auto_selected")
     if support_counts["extrapolated"]:
         warnings.append("bounded_temporal_extrapolation_used")
     if support_counts["ineligible"]:
@@ -469,6 +631,8 @@ def build_footpass_dynamic_projector(
             "max_interpolation_gap_frames": settings.max_interpolation_gap_frames,
             "max_extrapolation_gap_frames": settings.max_projector_gap_frames,
             "min_correspondences": float(settings.min_correspondences),
+            "bbox_source_width": float(settings.source_width),
+            "bbox_source_height": float(settings.source_height),
         },
     )
     return DynamicPitchProjector(

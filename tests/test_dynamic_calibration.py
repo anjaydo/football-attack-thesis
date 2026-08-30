@@ -212,6 +212,59 @@ class DynamicCalibrationTests(unittest.TestCase):
             self.assertIsNotNone(dynamic.for_frame(105))
             self.assertIsNotNone(dynamic.for_frame(145))
 
+    def test_selects_processing_bbox_scale_on_fullhd_canvas(self) -> None:
+        try:
+            import h5py
+            import cv2  # noqa: F401
+        except ImportError:
+            self.skipTest("dynamic calibration extras are not installed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tactical.h5"
+            rows = []
+            pitch_points = [
+                (10, 8),
+                (25, 10),
+                (40, 15),
+                (60, 12),
+                (85, 9),
+                (15, 30),
+                (35, 35),
+                (55, 28),
+                (75, 38),
+                (95, 32),
+                (25, 58),
+                (80, 55),
+            ]
+            for frame in range(100, 111):
+                for player_id, (pitch_x, pitch_y) in enumerate(pitch_points, start=1):
+                    image_x = 80.0 + 4.2 * pitch_x
+                    image_bottom = 35.0 + 4.0 * pitch_y
+                    row = np.zeros(14, dtype=np.float32)
+                    row[0] = frame
+                    row[1] = player_id
+                    row[5] = pitch_x / 105.0
+                    row[6] = pitch_y / 68.0
+                    row[9] = image_x
+                    row[10] = image_bottom
+                    row[11] = 30.0
+                    row[12] = 60.0
+                    rows.append(row)
+            with h5py.File(path, "w") as handle:
+                handle.create_dataset("game_1_H1", data=np.asarray(rows))
+
+            dynamic = build_footpass_dynamic_projector(
+                path,
+                "game_1_H1",
+                start_frame=100,
+                end_frame=110,
+                video_width=1920,
+                video_height=1080,
+            )
+            self.assertEqual(dynamic.report.status, "pass")
+            self.assertGreater(dynamic.report.valid_sampled_frames, 0)
+            self.assertLess(float(dynamic.report.thresholds["bbox_source_width"]), 1280)
+
     def test_rejects_invalid_frame_window(self) -> None:
         with self.assertRaises(ValueError):
             build_footpass_dynamic_projector(

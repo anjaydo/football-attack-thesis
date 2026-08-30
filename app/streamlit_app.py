@@ -603,82 +603,86 @@ def render_calibrated_window(
                         preview_fps=metadata.fps,
                     )
                 report = projector.report.to_dict()
-                can_run_yolo = int(report.get("valid_sampled_frames") or 0) > 0
-                if not can_run_yolo:
-                    st.session_state[result_key] = {
-                        "calibration": report,
-                        "analysis_status": "skipped",
-                        "analysis_skip_reason": "dynamic_calibration_quality_gate_failed",
-                    }
-                else:
-                    try:
-                        import torch
+                try:
+                    import torch
 
-                        device = "0" if torch.cuda.is_available() else "cpu"
-                    except ImportError:
-                        device = "cpu"
-                    stat = overlay_path.stat()
-                    video_identity = hashlib.sha256(
-                        f"{overlay_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode()
-                    ).hexdigest()
-                    vision_config = VisionConfig(
-                        pose_model=str(DEFAULT_POSE_MODEL),
-                        detection_model=str(DEFAULT_DETECTION_MODEL),
-                        device=device,
-                        image_size=960,
-                        start_frame=start_frame,
-                        max_frames=end_frame - start_frame + 1,
-                        field_lines=True,
+                    device = "0" if torch.cuda.is_available() else "cpu"
+                except ImportError:
+                    device = "cpu"
+                stat = overlay_path.stat()
+                video_identity = hashlib.sha256(
+                    f"{overlay_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode()
+                ).hexdigest()
+                overlay_size = 1280 if metadata.width >= 1280 else 960
+                vision_config = VisionConfig(
+                    pose_model=str(DEFAULT_POSE_MODEL),
+                    detection_model=str(DEFAULT_DETECTION_MODEL),
+                    device=device,
+                    image_size=overlay_size,
+                    start_frame=start_frame,
+                    max_frames=end_frame - start_frame + 1,
+                    field_lines=True,
+                    player_confidence=0.15,
+                    keypoint_confidence=0.2,
+                )
+                if int(report.get("valid_sampled_frames") or 0) == 0:
+                    st.warning(
+                        "Calibration FAIL trên cửa sổ này — vẫn chạy YOLO để tracking/skeleton; "
+                        "tọa độ sân có thể thiếu."
                     )
-                    with st.spinner(
-                        "Đang chạy YOLO trên Full HD, chiếu track lên mặt sân và áp dụng event quality gates..."
-                    ):
-                        window_manifest = run_cached_video_pipeline(
-                            overlay_path,
-                            PROJECT_ROOT / "runs" / "window-cache",
-                            video_identity,
-                            vision_config,
-                            projector=frame_projector,
-                            xg_model_path=(DEFAULT_XG_MODEL if DEFAULT_XG_MODEL.is_file() else None),
-                            source_tier="predicted_actions_oracle_tactical",
-                            dataset_paths=(playbyplay_path, tactical_path),
-                            cache_context={
-                                "calibration": "footpass_dynamic_roi_homography_v3_temporal",
-                                "overlay": "fullhd",
-                                "match_key": match_key,
-                                "tactical_mtime": tactical_path.stat().st_mtime,
-                                "xg_model_mtime": (
-                                    DEFAULT_XG_MODEL.stat().st_mtime
-                                    if DEFAULT_XG_MODEL.is_file()
-                                    else None
-                                ),
-                            },
+                    yolo_projector = None
+                else:
+                    yolo_projector = frame_projector
+                with st.spinner(
+                    "Đang chạy YOLO trên Full HD, chiếu track lên mặt sân và áp dụng event quality gates..."
+                ):
+                    window_manifest = run_cached_video_pipeline(
+                        overlay_path,
+                        PROJECT_ROOT / "runs" / "window-cache",
+                        video_identity,
+                        vision_config,
+                        projector=yolo_projector,
+                        xg_model_path=(DEFAULT_XG_MODEL if DEFAULT_XG_MODEL.is_file() else None),
+                        source_tier="predicted_actions_oracle_tactical",
+                        dataset_paths=(playbyplay_path, tactical_path),
+                        cache_context={
+                            "calibration": "footpass_dynamic_roi_homography_v3_temporal",
+                            "overlay": "fullhd_pose_gk_v2",
+                            "match_key": match_key,
+                            "tactical_mtime": tactical_path.stat().st_mtime,
+                            "xg_model_mtime": (
+                                DEFAULT_XG_MODEL.stat().st_mtime
+                                if DEFAULT_XG_MODEL.is_file()
+                                else None
+                            ),
+                        },
+                    )
+                    window_manifest = dict(window_manifest)
+                    window_manifest["video_clock"] = resolver.video_clock(
+                        match_key,
+                        preview_fps=metadata.fps,
+                    )
+                    window_manifest["calibration"] = report
+                    try:
+                        st.session_state[result_key] = persist_footpass_window_stream(
+                            window_manifest,
+                            sequence,
+                            start_sec=resolver.preview_sec_to_match_sec(
+                                match_key, start_sec
+                            ),
+                            end_sec=resolver.preview_sec_to_match_sec(
+                                match_key, end_sec
+                            ),
                         )
+                    except Exception as persist_error:
+                        LOGGER.exception("Window stream persist failed after YOLO")
                         window_manifest = dict(window_manifest)
-                        window_manifest["video_clock"] = resolver.video_clock(
-                            match_key,
-                            preview_fps=metadata.fps,
+                        window_manifest["persist_warning"] = str(persist_error)
+                        st.session_state[result_key] = window_manifest
+                        st.warning(
+                            "YOLO đã chạy xong nhưng không lưu được PossessionCandidateV1: "
+                            f"{persist_error}"
                         )
-                        try:
-                            st.session_state[result_key] = persist_footpass_window_stream(
-                                window_manifest,
-                                sequence,
-                                start_sec=resolver.preview_sec_to_match_sec(
-                                    match_key, start_sec
-                                ),
-                                end_sec=resolver.preview_sec_to_match_sec(
-                                    match_key, end_sec
-                                ),
-                            )
-                        except Exception as persist_error:
-                            LOGGER.exception("Window stream persist failed after YOLO")
-                            window_manifest = dict(window_manifest)
-                            window_manifest["persist_warning"] = str(persist_error)
-                            st.session_state[result_key] = window_manifest
-                            st.warning(
-                                "YOLO đã chạy xong nhưng không lưu được PossessionCandidateV1: "
-                                f"{persist_error}"
-                            )
             except Exception as error:
                 LOGGER.exception("Calibrated FOOTPASS window failed")
                 st.error(f"Không thể phân tích cửa sổ đã chọn: {error}")
