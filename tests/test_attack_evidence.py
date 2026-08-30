@@ -89,6 +89,17 @@ class AttackEvidenceTests(unittest.TestCase):
         self.assertTrue(evidence.quality_gates["yolo_observations"])
         self.assertEqual(score_attack_with_observations(attack, frame).withheld_reason, "no_xg_v2_model")
 
+    def test_maps_match_frame_to_fullhd_observation_index(self) -> None:
+        from attack_analysis.attack_evidence import video_frame_for_match_frame
+
+        self.assertEqual(
+            video_frame_for_match_frame(
+                250,
+                {"video_clock": {"preview_fps": 50.0, "match_fps": 25.0, "preview_offset_sec": 1.5}},
+            ),
+            575,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

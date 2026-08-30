@@ -117,22 +117,96 @@ class VideoPathResolver:
         offset = sync.processing_offset_sec if sync is not None else 0.0
         return max(0.0, float(match_sec) + offset)
 
-    def match_frame_to_processing_frame(self, match_key: str, frame: int) -> int:
+    def preview_sec_to_match_sec(self, match_key: str, preview_sec: float) -> float:
         sync = self._sync_lookup(match_key)
-        fps = sync.processing_fps if sync is not None else self.default_match_fps
-        processing_sec = self.match_sec_to_processing_sec(match_key, frame / fps)
-        return max(0, int(round(processing_sec * fps)))
+        offset = sync.preview_offset_sec if sync is not None else 0.0
+        return max(0.0, float(preview_sec) - offset)
+
+    def match_sec_to_preview_frame(
+        self,
+        match_key: str,
+        match_sec: float,
+        preview_fps: float,
+    ) -> int:
+        if preview_fps <= 0:
+            raise ValueError("preview_fps must be positive")
+        return max(0, int(round(self.match_sec_to_preview_sec(match_key, match_sec) * preview_fps)))
+
+    def preview_frame_to_match_frame(
+        self,
+        match_key: str,
+        preview_frame: int,
+        preview_fps: float,
+    ) -> int:
+        if preview_fps <= 0:
+            raise ValueError("preview_fps must be positive")
+        preview_sec = preview_frame / preview_fps
+        sync = self._sync_lookup(match_key)
+        offset = sync.preview_offset_sec if sync is not None else 0.0
+        match_fps = sync.processing_fps if sync is not None else self.default_match_fps
+        match_sec = max(0.0, preview_sec - offset)
+        return max(0, int(round(match_sec * match_fps)))
+
+    def yolo_video_path(self, match_key: str) -> Path:
+        """Full HD overlay source when available; otherwise the processing file."""
+
+        preview = self.preview_path(match_key)
+        if preview.is_file():
+            return preview
+        return self.processing_path(match_key)
+
+    def video_clock(self, match_key: str, *, preview_fps: float) -> dict[str, float | str]:
+        sync = self._sync_lookup(match_key)
+        return {
+            "role": "fullhd" if self.preview_path(match_key).is_file() else "processing",
+            "preview_fps": float(preview_fps),
+            "match_fps": float(sync.processing_fps if sync is not None else self.default_match_fps),
+            "preview_offset_sec": float(sync.preview_offset_sec if sync is not None else 0.0),
+        }
 
     def describe_preview(self, match_key: str, *, start_sec: float, end_sec: float) -> str:
         preview_start = self.match_sec_to_preview_sec(match_key, start_sec)
         preview_end = self.match_sec_to_preview_sec(match_key, end_sec)
         preview_path = self.preview_path(match_key)
-        if self.dual_video_enabled(match_key):
-            return (
-                f"{preview_path.name} (Full HD) · {preview_start:.1f}–{preview_end:.1f}s · "
-                f"YOLO/calibration dùng {self.processing_path(match_key).name}"
-            )
+        if self.preview_path(match_key).is_file() and self.processing_path(match_key).is_file():
+            try:
+                dual = preview_path.resolve() != self.processing_path(match_key).resolve()
+            except OSError:
+                dual = True
+            if dual:
+                return (
+                    f"{preview_path.name} (Full HD) · {preview_start:.1f}–{preview_end:.1f}s · "
+                    f"YOLO overlay cũng xuất từ Full HD"
+                )
         return f"{preview_path.name} · {preview_start:.1f}–{preview_end:.1f}s"
+
+
+@dataclass(frozen=True)
+class PreviewClockProjector:
+    """Translate Full HD video frames into FOOTPASS match frames for homography lookup."""
+
+    inner: object
+    match_key: str
+    resolver: VideoPathResolver
+    preview_fps: float
+
+    def for_frame(self, frame_index: int):
+        return self.inner.for_frame(  # type: ignore[attr-defined]
+            self.resolver.preview_frame_to_match_frame(
+                self.match_key,
+                frame_index,
+                self.preview_fps,
+            )
+        )
+
+    def confidence_for_frame(self, frame_index: int):
+        return self.inner.confidence_for_frame(  # type: ignore[attr-defined]
+            self.resolver.preview_frame_to_match_frame(
+                self.match_key,
+                frame_index,
+                self.preview_fps,
+            )
+        )
 
 
 def _configured_preview_root() -> Path | None:

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from attack_analysis.video_paths import VideoPathResolver
+from attack_analysis.video_paths import PreviewClockProjector, VideoPathResolver
 
 
 class VideoPathResolverTests(unittest.TestCase):
@@ -49,6 +49,40 @@ class VideoPathResolverTests(unittest.TestCase):
                 self.assertEqual(resolver.preview_path("game_18_H1"), high / "game_18.mp4")
                 self.assertEqual(resolver.match_sec_to_preview_sec("game_18_H1", 10.0), 11.5)
                 self.assertEqual(resolver.match_sec_to_processing_sec("game_18_H1", 10.0), 10.0)
+                self.assertEqual(resolver.yolo_video_path("game_18_H1"), high / "game_18.mp4")
+                self.assertEqual(
+                    resolver.match_sec_to_preview_frame("game_18_H1", 10.0, 50.0),
+                    575,
+                )
+                self.assertEqual(
+                    resolver.preview_frame_to_match_frame("game_18_H1", 575, 50.0),
+                    250,
+                )
+                self.assertEqual(resolver.preview_sec_to_match_sec("game_18_H1", 11.5), 10.0)
+                clock = resolver.video_clock("game_18_H1", preview_fps=50.0)
+                self.assertEqual(clock["role"], "fullhd")
+                self.assertEqual(clock["preview_offset_sec"], 1.5)
+
+                class _Inner:
+                    def __init__(self) -> None:
+                        self.seen: list[int] = []
+
+                    def for_frame(self, frame_index: int) -> int:
+                        self.seen.append(frame_index)
+                        return frame_index
+
+                    def confidence_for_frame(self, frame_index: int) -> float:
+                        return float(frame_index)
+
+                inner = _Inner()
+                projector = PreviewClockProjector(
+                    inner=inner,
+                    match_key="game_18_H1",
+                    resolver=resolver,
+                    preview_fps=50.0,
+                )
+                self.assertEqual(projector.for_frame(575), 250)
+                self.assertEqual(inner.seen, [250])
             finally:
                 for key, value in previous.items():
                     if value is None:

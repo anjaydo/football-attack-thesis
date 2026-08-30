@@ -87,7 +87,7 @@ from attack_analysis.research import AttackConclusionV2, EvidenceBundle, Evaluat
 from attack_analysis.web_search import brave_search_configured, brave_search_context
 from attack_analysis.upload_pipeline import run_cached_video_pipeline, vision_cache_key
 from attack_analysis.video import inspect_video
-from attack_analysis.video_paths import VideoPathResolver
+from attack_analysis.video_paths import PreviewClockProjector, VideoPathResolver
 from attack_analysis.vision_pipeline import VisionConfig
 from attack_analysis.window_analysis import persist_footpass_window_stream
 
@@ -319,7 +319,7 @@ def load_video_path_resolver() -> VideoPathResolver:
 
 
 def match_video_path(match_key: str) -> Path:
-    """Low-quality processing video used for YOLO/calibration."""
+    """Low-quality processing video (FOOTPASS extract). Overlay YOLO uses Full HD."""
 
     return load_video_path_resolver().processing_path(match_key)
 
@@ -493,22 +493,31 @@ def render_calibrated_window(
 ) -> None:
     st.subheader("Phân tích video theo khung thời gian")
     resolver = video_resolver or load_video_path_resolver()
-    dual_video = resolver.dual_video_enabled(match_key)
+    overlay_path = resolver.yolo_video_path(match_key)
+    if not overlay_path.is_file():
+        overlay_path = video_path
+    processing_path = resolver.processing_path(match_key)
+    try:
+        using_fullhd = overlay_path.is_file() and (
+            not processing_path.is_file()
+            or overlay_path.resolve() != processing_path.resolve()
+        )
+    except OSError:
+        using_fullhd = overlay_path.is_file() and str(overlay_path) != str(processing_path)
     st.caption(
         "Chọn một cửa sổ ngắn quanh chuỗi possession. YOLO chỉ chạy trong cửa sổ này; "
-        "frame/timestamp vẫn giữ theo toàn trận để khớp event và tactical HDF5."
+        "frame/timestamp FOOTPASS vẫn giữ theo toàn trận để khớp event và tactical HDF5."
         + (
-            f" Pipeline vision đọc `{video_path.name}` (video xử lý). "
-            "Preview sự kiện phía trên dùng Full HD từ "
-            f"`{resolver.preview_path(match_key).parent}`."
-            if dual_video
+            f" Overlay YOLO xuất từ Full HD `{overlay_path.name}` "
+            f"({resolver.preview_path(match_key).parent})."
+            if using_fullhd and overlay_path.is_file()
             else ""
         )
     )
-    if not video_path.is_file() or not playbyplay_path.is_file() or not tactical_path.is_file():
+    if not overlay_path.is_file() or not playbyplay_path.is_file() or not tactical_path.is_file():
         missing = []
-        if not video_path.is_file():
-            missing.append(str(video_path))
+        if not overlay_path.is_file():
+            missing.append(str(overlay_path))
         if not playbyplay_path.is_file():
             missing.append(str(playbyplay_path))
         if not tactical_path.is_file():
@@ -516,15 +525,20 @@ def render_calibrated_window(
         st.warning("Thiếu dữ liệu để chạy calibrated window: " + ", ".join(missing))
         return
 
-    metadata = inspect_video(video_path)
+    metadata = inspect_video(overlay_path)
     widget_key = hashlib.sha1(
-        f"{sequence.attack_id}|{sequence.source}".encode("utf-8")
+        f"{sequence.attack_id}|{sequence.source}|fullhd-overlay".encode("utf-8")
     ).hexdigest()[:12]
-    default_start = max(0.0, sequence.start_sec - 1.0)
-    default_end = min(metadata.duration_sec, max(sequence.end_sec + 1.0, default_start + 2.0))
+    preview_default_start = resolver.match_sec_to_preview_sec(match_key, max(0.0, sequence.start_sec - 1.0))
+    preview_default_end = resolver.match_sec_to_preview_sec(
+        match_key,
+        max(sequence.end_sec + 1.0, sequence.start_sec + 1.0),
+    )
+    default_start = max(0.0, preview_default_start)
+    default_end = min(metadata.duration_sec, max(preview_default_end, default_start + 2.0))
     start_column, end_column = st.columns(2)
     start_sec = start_column.number_input(
-        "Bắt đầu (giây toàn trận)",
+        "Bắt đầu (giây video overlay)",
         min_value=0.0,
         max_value=float(metadata.duration_sec),
         value=float(round(default_start, 2)),
@@ -532,7 +546,7 @@ def render_calibrated_window(
         key=f"window_start_{widget_key}",
     )
     end_sec = end_column.number_input(
-        "Kết thúc (giây toàn trận)",
+        "Kết thúc (giây video overlay)",
         min_value=0.0,
         max_value=float(metadata.duration_sec),
         value=float(round(default_end, 2)),
@@ -541,7 +555,7 @@ def render_calibrated_window(
     )
     duration = end_sec - start_sec
     st.caption(
-        f"Cửa sổ {duration:.1f}s · khoảng {max(0, round(duration * metadata.fps)):,} frame. "
+        f"Cửa sổ {duration:.1f}s · khoảng {max(0, round(duration * metadata.fps)):,} frame Full HD. "
         "Giới hạn 30 giây để phù hợp GPU 6 GB và giữ thời gian demo hợp lý."
     )
 
@@ -562,15 +576,31 @@ def render_calibrated_window(
                     metadata.frame_count - 1,
                     int(round(end_sec * metadata.fps)),
                 )
+                match_start_frame = resolver.preview_frame_to_match_frame(
+                    match_key,
+                    start_frame,
+                    metadata.fps,
+                )
+                match_end_frame = resolver.preview_frame_to_match_frame(
+                    match_key,
+                    end_frame,
+                    metadata.fps,
+                )
                 with st.spinner("Đang fit homography động và kiểm tra holdout error..."):
                     projector = load_dynamic_projector(
                         str(tactical_path),
                         match_key,
-                        start_frame,
-                        end_frame,
+                        match_start_frame,
+                        match_end_frame,
                         metadata.width,
                         metadata.height,
                         tactical_path.stat().st_mtime,
+                    )
+                    frame_projector = PreviewClockProjector(
+                        inner=projector,
+                        match_key=match_key,
+                        resolver=resolver,
+                        preview_fps=metadata.fps,
                     )
                 report = projector.report.to_dict()
                 can_run_yolo = int(report.get("valid_sampled_frames") or 0) > 0
@@ -587,9 +617,9 @@ def render_calibrated_window(
                         device = "0" if torch.cuda.is_available() else "cpu"
                     except ImportError:
                         device = "cpu"
-                    stat = video_path.stat()
+                    stat = overlay_path.stat()
                     video_identity = hashlib.sha256(
-                        f"{video_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode()
+                        f"{overlay_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode()
                     ).hexdigest()
                     vision_config = VisionConfig(
                         pose_model=str(DEFAULT_POSE_MODEL),
@@ -601,19 +631,20 @@ def render_calibrated_window(
                         field_lines=True,
                     )
                     with st.spinner(
-                        "Đang chạy YOLO, chiếu track lên mặt sân và áp dụng event quality gates..."
+                        "Đang chạy YOLO trên Full HD, chiếu track lên mặt sân và áp dụng event quality gates..."
                     ):
                         window_manifest = run_cached_video_pipeline(
-                            video_path,
+                            overlay_path,
                             PROJECT_ROOT / "runs" / "window-cache",
                             video_identity,
                             vision_config,
-                            projector=projector,
+                            projector=frame_projector,
                             xg_model_path=(DEFAULT_XG_MODEL if DEFAULT_XG_MODEL.is_file() else None),
                             source_tier="predicted_actions_oracle_tactical",
                             dataset_paths=(playbyplay_path, tactical_path),
                             cache_context={
                                 "calibration": "footpass_dynamic_roi_homography_v3_temporal",
+                                "overlay": "fullhd",
                                 "match_key": match_key,
                                 "tactical_mtime": tactical_path.stat().st_mtime,
                                 "xg_model_mtime": (
@@ -623,12 +654,21 @@ def render_calibrated_window(
                                 ),
                             },
                         )
+                        window_manifest = dict(window_manifest)
+                        window_manifest["video_clock"] = resolver.video_clock(
+                            match_key,
+                            preview_fps=metadata.fps,
+                        )
                         try:
                             st.session_state[result_key] = persist_footpass_window_stream(
                                 window_manifest,
                                 sequence,
-                                start_sec=start_sec,
-                                end_sec=end_sec,
+                                start_sec=resolver.preview_sec_to_match_sec(
+                                    match_key, start_sec
+                                ),
+                                end_sec=resolver.preview_sec_to_match_sec(
+                                    match_key, end_sec
+                                ),
                             )
                         except Exception as persist_error:
                             LOGGER.exception("Window stream persist failed after YOLO")
@@ -1285,7 +1325,7 @@ with analysis_tab:
             )
 
             video_resolver = load_video_path_resolver()
-            processing_video_path = video_resolver.processing_path(match_key)
+            yolo_video_path = video_resolver.yolo_video_path(match_key)
             preview_video_path = video_resolver.preview_path(match_key)
             preview_sequence = possession_to_preview_sequence(
                 possession_v2,
@@ -1299,8 +1339,8 @@ with analysis_tab:
             st.markdown("#### Preview video sự kiện")
             if video_resolver.dual_video_enabled(match_key):
                 st.caption(
-                    "Preview Full HD · YOLO/calibration vẫn chạy trên video chất lượng thấp "
-                    f"({processing_video_path.name}). Mapping thời gian: "
+                    "Preview và overlay YOLO đều dùng Full HD "
+                    f"({preview_video_path.name}). Mapping thời gian: "
                     f"`{video_resolver.sync_path or 'offset mặc định 0s'}`."
                 )
             preview_start_sec = video_resolver.match_sec_to_preview_sec(
@@ -1322,7 +1362,7 @@ with analysis_tab:
             render_calibrated_window(
                 preview_sequence,
                 match_key=match_key,
-                video_path=processing_video_path,
+                video_path=yolo_video_path,
                 playbyplay_path=playbyplay,
                 tactical_path=tactical,
                 video_resolver=video_resolver,

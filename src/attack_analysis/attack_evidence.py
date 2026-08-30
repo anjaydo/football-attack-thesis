@@ -158,16 +158,32 @@ def observations_path_from_manifest(window_manifest: Mapping[str, Any] | None) -
     return path if path.is_file() else None
 
 
+def video_frame_for_match_frame(
+    match_frame: int,
+    window_manifest: Mapping[str, Any] | None = None,
+) -> int:
+    clock = dict((window_manifest or {}).get("video_clock") or {})
+    preview_fps = clock.get("preview_fps")
+    if not preview_fps:
+        return match_frame
+    match_fps = float(clock.get("match_fps") or 25.0)
+    offset = float(clock.get("preview_offset_sec") or 0.0)
+    return max(0, int(round((match_frame / match_fps + offset) * float(preview_fps))))
+
+
 def frame_for_terminal(
     frames: tuple[FrameObservation, ...],
     terminal_frame: int,
+    *,
+    window_manifest: Mapping[str, Any] | None = None,
 ) -> FrameObservation | None:
     if not frames:
         return None
-    exact = next((item for item in frames if item.frame_index == terminal_frame), None)
+    target = video_frame_for_match_frame(terminal_frame, window_manifest)
+    exact = next((item for item in frames if item.frame_index == target), None)
     if exact is not None:
         return exact
-    return min(frames, key=lambda item: abs(item.frame_index - terminal_frame))
+    return min(frames, key=lambda item: abs(item.frame_index - target))
 
 
 def _ball_f1_from_manifest(window_manifest: Mapping[str, Any] | None) -> float | None:
@@ -231,7 +247,11 @@ def build_attack_evidence(
     quality_gates["xg_model"] = loaded_model is not None
     mapping = dict(team_mapping) if team_mapping else default_team_mapping(attack_v2)
     if loaded_frames:
-        frame = frame_for_terminal(loaded_frames, terminal.frame)
+        frame = frame_for_terminal(
+            loaded_frames,
+            terminal.frame,
+            window_manifest=window_manifest,
+        )
         if frame is None:
             withheld = "terminal_frame_missing"
             limitations.append("YOLO observations exist but the terminal frame was not found.")
