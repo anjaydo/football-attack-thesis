@@ -271,6 +271,99 @@ class EvaluationVerdict:
         return item
 
 
+CHANCE_QUALITY_VALUES = ("high", "medium", "low", "unknown")
+
+
+@dataclass(frozen=True)
+class AttackConclusionV2:
+    attack_id: str
+    chance_quality: str
+    xg_probability: float | None
+    tactical_read: str
+    structural_features: tuple[str, ...]
+    comparison_to_role_benchmark: str | None
+    claims: tuple[EvidenceClaim, ...]
+    limitations: tuple[str, ...]
+    abstained_effectiveness: bool = True
+    effectiveness_verdict: None = None
+    model: str | None = None
+    prompt_version: str | None = None
+    tool_trace: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+
+    def validate(self, available_evidence: frozenset[str] | None = None) -> None:
+        if self.chance_quality not in CHANCE_QUALITY_VALUES:
+            raise ValueError(f"unsupported chance_quality: {self.chance_quality}")
+        if self.effectiveness_verdict is not None:
+            raise ValueError("categorical effectiveness is withheld for Attack-v2 conclusions")
+        if not self.abstained_effectiveness:
+            raise ValueError("Attack-v2 conclusions must abstain from effectiveness")
+        if not self.tactical_read.strip():
+            raise ValueError("tactical_read is required")
+        if available_evidence is not None:
+            unsupported = {
+                evidence_id
+                for claim in self.claims
+                for evidence_id in claim.evidence_ids
+                if evidence_id not in available_evidence
+            }
+            if unsupported:
+                raise ValueError(f"unsupported evidence ids: {sorted(unsupported)}")
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        result = {
+            "schema_version": "attack-conclusion-v2/1.0",
+            "attack_id": self.attack_id,
+            "chance_quality": self.chance_quality,
+            "xg_probability": self.xg_probability,
+            "tactical_read": self.tactical_read,
+            "structural_features": list(self.structural_features),
+            "comparison_to_role_benchmark": self.comparison_to_role_benchmark,
+            "claims": [item.to_dict() for item in self.claims],
+            "limitations": list(self.limitations),
+            "abstained_effectiveness": self.abstained_effectiveness,
+            "effectiveness_verdict": self.effectiveness_verdict,
+            "tool_trace": list(self.tool_trace),
+        }
+        if self.model is not None:
+            result["model"] = self.model
+        if self.prompt_version is not None:
+            result["prompt_version"] = self.prompt_version
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AttackConclusionV2":
+        item = cls(
+            attack_id=str(data["attack_id"]),
+            chance_quality=str(data.get("chance_quality") or "unknown"),
+            xg_probability=(
+                float(data["xg_probability"]) if data.get("xg_probability") is not None else None
+            ),
+            tactical_read=str(data.get("tactical_read") or ""),
+            structural_features=tuple(str(value) for value in data.get("structural_features", ())),
+            comparison_to_role_benchmark=(
+                str(data["comparison_to_role_benchmark"])
+                if data.get("comparison_to_role_benchmark")
+                else None
+            ),
+            claims=tuple(
+                EvidenceClaim(
+                    text=str(claim["text"]),
+                    evidence_ids=tuple(str(value) for value in claim.get("evidence_ids", ())),
+                )
+                for claim in data.get("claims", ())
+            ),
+            limitations=tuple(str(value) for value in data.get("limitations", ())),
+            abstained_effectiveness=bool(data.get("abstained_effectiveness", True)),
+            effectiveness_verdict=None,
+            model=(str(data["model"]) if data.get("model") else None),
+            prompt_version=(str(data["prompt_version"]) if data.get("prompt_version") else None),
+            tool_trace=tuple(dict(value) for value in data.get("tool_trace", ())),
+        )
+        item.validate()
+        return item
+
+
 def insufficient_evidence_verdict(
     attack_id: str,
     limitations: tuple[str, ...],

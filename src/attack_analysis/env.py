@@ -26,3 +26,18 @@ DEFAULT_OPENAI_MODEL = "gpt-5.4-nano"
 def openai_model() -> str:
     configured = os.environ.get("OPENAI_MODEL", "").strip()
     return configured or DEFAULT_OPENAI_MODEL
+
+
+def brave_search_api_key() -> str:
+    return os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()
+
+
+def brave_search_configured() -> bool:
+    return bool(brave_search_api_key())
+
+
+def xg_v2_model_path(project_root: Path) -> Path:
+    configured = os.environ.get("XG_V2_MODEL_PATH", "").strip()
+    if configured:
+        return Path(configured)
+    return project_root / "models" / "xg-v2.joblib"

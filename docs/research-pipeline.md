@@ -124,10 +124,23 @@ For an exploratory external clip, `attack-analysis analyze-clip VIDEO RUN_DIR`
 is an alias of the complete CV pipeline. Without calibrated tracking and a ball
 quality gate, its evidence contract abstains instead of emitting xG claims.
 
-The FOOTPASS tab compares oracle and predicted actions, shows video at the attack
-start, event timeline, pitch coordinates, quality gates and structured evidence.
-The upload tab is deliberately exploratory: without validated dynamic calibration
-and player-centric events it returns `insufficient_evidence`.
+The FOOTPASS tab decodes Attack-v2, plots possession-relative pitch coordinates,
+runs a YOLO window for spatial context, then **Đưa ra kết luận** builds an
+`AttackEvidenceBundle`: FOOTPASS terminal + YOLO `observations.jsonl` + local
+`models/xg-v2.joblib` (research_only). The conclusion is `attack-verdict-v2`
+(chance quality, tactical read, frozen benchmarks, optional Brave Search context).
+It does **not** emit a categorical effectiveness label.
+
+```powershell
+# Frozen role benchmarks (optional numeric comparison)
+attack-analysis build-footpass-benchmarks ..\FOOTPASS\data\val_tactical_data.h5 data\benchmarks.jsonl
+
+# MCP stdio tools: get_attack_evidence, frozen stats, Brave context, verify_claims
+attack-analysis serve-mcp --benchmarks data\benchmarks.jsonl
+```
+
+Set `BRAVE_SEARCH_API_KEY` for non-numeric web snippets. Set `XG_V2_MODEL_PATH`
+if the joblib artifact is not at `models/xg-v2.joblib`.
 
 The three project skills under `.cursor/skills/` are versioned prompt modules.
 The API client loads them, exposes only the whitelist in `EvidenceToolRegistry`,

@@ -13,9 +13,25 @@ import pandas as pd
 import streamlit as st
 
 from attack_analysis.agent_tools import EvidenceToolRegistry
+from attack_analysis.attack_evidence import build_attack_evidence, default_team_mapping
 from attack_analysis.attack_features import build_attack_features
 from attack_analysis.benchmarks import FrozenBenchmarkStore
-from attack_analysis.env import load_project_environment, openai_api_key_configured, openai_model
+from attack_analysis.env import (
+    load_project_environment,
+    openai_api_key_configured,
+    openai_model,
+    xg_v2_model_path,
+)
+from attack_analysis.footpass import (
+    FootpassSegmentationConfig,
+    attack_view_median_x,
+    footpass_summary,
+    footpass_v2_summary,
+    load_footpass_events,
+    possession_relative_position,
+    prepare_footpass_actions_v2,
+    segment_footpass_attacks,
+)
 from attack_analysis import browser_video as _browser_video
 from attack_analysis import dynamic_calibration as _dynamic_calibration
 from attack_analysis import pitch_visualization as _pitch_visualization
@@ -40,14 +56,6 @@ from attack_analysis.attack_v2_shot_insights import (
     filter_sequence_entries,
     format_shot_outcome,
     resolve_shot_outcome,
-)
-from attack_analysis.footpass import (
-    FootpassSegmentationConfig,
-    footpass_summary,
-    footpass_v2_summary,
-    load_footpass_events,
-    prepare_footpass_actions_v2,
-    segment_footpass_attacks,
 )
 from attack_analysis.overview import attack_v2_research_overview
 from attack_analysis.gold_annotations import (
@@ -75,7 +83,8 @@ from attack_analysis.models import (
     PossessionSequenceV2,
 )
 from attack_analysis.possession import PossessionAssessment, assess_possession
-from attack_analysis.research import EvidenceBundle, EvaluationVerdict, insufficient_evidence_verdict
+from attack_analysis.research import AttackConclusionV2, EvidenceBundle, EvaluationVerdict, insufficient_evidence_verdict
+from attack_analysis.web_search import brave_search_configured, brave_search_context
 from attack_analysis.upload_pipeline import run_cached_video_pipeline, vision_cache_key
 from attack_analysis.video import inspect_video
 from attack_analysis.video_paths import VideoPathResolver
@@ -97,13 +106,15 @@ DEFAULT_VIDEO_ROOT = (
     else _CONFIGURED_VIDEO_ROOT
 )
 DEFAULT_XG_MODEL = PROJECT_ROOT / "models" / "xg-v1.joblib"
+DEFAULT_XG_V2_MODEL = xg_v2_model_path(PROJECT_ROOT)
+DEFAULT_BENCHMARKS = PROJECT_ROOT / "data" / "benchmarks.jsonl"
 DEFAULT_EVENT_PROFILE = PROJECT_ROOT / "models" / "dst-thresholds-v1.json"
 DEFAULT_POSE_MODEL = PROJECT_ROOT / "yolo26n-pose.pt"
 DEFAULT_DETECTION_MODEL = PROJECT_ROOT / "yolo26n.pt"
 LOGGER = logging.getLogger(__name__)
 
 
-def show_event_pitch(items, *, heading: str, caption: str) -> None:
+def show_event_pitch(items, *, heading: str, caption: str, attack_relative: bool = True) -> None:
     positioned = tuple(
         item
         for item in items
@@ -113,7 +124,7 @@ def show_event_pitch(items, *, heading: str, caption: str) -> None:
         return
     st.subheader(heading)
     st.caption(caption)
-    pitch_figure = plot_pitch_events(positioned)
+    pitch_figure = plot_pitch_events(positioned, attack_relative=attack_relative)
     st.pyplot(pitch_figure, width="stretch")
     plt.close(pitch_figure)
 
@@ -249,6 +260,11 @@ def load_attack_v2_analysis(
 @st.cache_resource(show_spinner=False)
 def load_gold_outcome_index():
     return GoldOutcomeIndex.load(PROJECT_ROOT)
+
+
+@st.cache_resource(show_spinner=False)
+def load_benchmark_store():
+    return FrozenBenchmarkStore.from_jsonl(DEFAULT_BENCHMARKS)
 
 
 def render_shot_promotion_audit(insights) -> None:
@@ -628,6 +644,8 @@ def render_calibrated_window(
                 st.error(f"Không thể phân tích cửa sổ đã chọn: {error}")
 
     manifest = st.session_state.get(result_key)
+    if manifest:
+        st.session_state[f"window_manifest_{sequence.attack_id}"] = manifest
     if not manifest:
         st.info(
             "FOOTPASS-assisted calibration dùng bottom-center ROI của cầu thủ làm correspondence "
@@ -814,6 +832,88 @@ SOURCE_LABELS = {
     "footpass_oracle": "FOOTPASS · Oracle",
     "footpass_predicted": "FOOTPASS · Predicted",
 }
+
+
+def render_conclusion_v2(
+    conclusion: AttackConclusionV2,
+    evidence,
+    overview: dict[str, object] | None,
+) -> None:
+    st.markdown("### Kết luận Attack-v2 (research-only)")
+    st.caption("Không gán nhãn hiệu quả categorical. xG-v2 là research_only cho tới human-domain validation.")
+    if overview:
+        summary_cols = st.columns(4)
+        xg_value = overview.get("xg")
+        summary_cols[0].metric("Terminal", str(overview.get("terminal_type") or "—"))
+        summary_cols[1].metric(
+            "xG-v2",
+            "—" if xg_value is None else f"{float(xg_value):.3f}",
+        )
+        summary_cols[2].metric("Chance quality", conclusion.chance_quality)
+        summary_cols[3].metric("Actions", int(overview.get("action_count") or 0))
+        if overview.get("xg_status") != "scored":
+            st.info(f"xG status: `{overview.get('xg_status')}` · {evidence.withheld_reason or 'chưa fusion'}")
+        else:
+            st.caption(f"xG model `{overview.get('xg_model_id')}` · `{evidence.xg_release_status}`")
+
+    st.markdown("#### 1. Chance quality")
+    if conclusion.xg_probability is not None:
+        st.write(f"xG-v2 = **{conclusion.xg_probability:.3f}** · band `{conclusion.chance_quality}`")
+    else:
+        st.write("Chưa có xác suất xG. Có thể đọc chiến thuật mà không gắn số cơ hội.")
+
+    st.markdown("#### 2. Spatial context")
+    fusion = evidence.fusion
+    if fusion is None:
+        st.caption("Chưa có YOLO overlay cho sequence này. Chạy cửa sổ calibrated để fusion.")
+    else:
+        assoc = fusion.association
+        cols = st.columns(4)
+        cols[0].metric("Association", assoc.method)
+        cols[1].metric("Track", assoc.track_id or "—")
+        cols[2].metric(
+            "Distance",
+            "—" if assoc.distance_m is None else f"{assoc.distance_m:.2f} m",
+        )
+        cols[3].metric("Foes", assoc.xg_raw.get("foe_players") if assoc.xg_raw else "—")
+        st.json(assoc.xg_raw, expanded=False)
+
+    st.markdown("#### 3. So sánh benchmark")
+    if evidence.benchmarks:
+        st.dataframe(
+            pd.DataFrame([item.to_dict() for item in evidence.benchmarks]),
+            width="stretch",
+            hide_index=True,
+        )
+        if conclusion.comparison_to_role_benchmark:
+            st.write(conclusion.comparison_to_role_benchmark)
+    else:
+        st.caption("Không có frozen benchmark khớp. Chạy `build-footpass-benchmarks` hoặc dùng `data/benchmarks.jsonl`.")
+
+    st.markdown("#### 4. Bối cảnh web (không dùng làm số liệu)")
+    if evidence.web_context:
+        for snippet in evidence.web_context:
+            title = str(snippet.get("title") or "Kết quả")
+            url = str(snippet.get("url") or "")
+            description = str(snippet.get("description") or "")
+            st.markdown(f"- [{title}]({url}) — {description}" if url else f"- {title} — {description}")
+        st.caption("Brave Search: context only, không cite cho xG/benchmark.")
+    else:
+        st.caption("Không có snippet web. Đặt `BRAVE_SEARCH_API_KEY` để bật.")
+
+    st.markdown("#### 5. Tactical read")
+    st.write(conclusion.tactical_read)
+    if conclusion.structural_features:
+        for item in conclusion.structural_features:
+            st.write(f"- {item}")
+    for claim in conclusion.claims:
+        st.write(f"- {claim.text} (`{'`, `'.join(claim.evidence_ids)}`)")
+    if conclusion.limitations:
+        with st.expander("Limitations"):
+            for item in conclusion.limitations:
+                st.write(f"• {item}")
+    with st.expander("Provenance JSON"):
+        st.json({"overview": overview, "conclusion": conclusion.to_dict(), "evidence": evidence.to_dict()}, expanded=False)
 
 
 def render_verdict(
@@ -1132,6 +1232,27 @@ with analysis_tab:
                     "Outcome": action.outcome or "—",
                     "Actor team": action.actor_team_id or "unknown",
                     "Possession team": action.possession_team_id or "unknown",
+                    "L2R": action.raw_left_to_right,
+                    "x": None if action.x is None else round(action.x, 1),
+                    "x_attack": (
+                        None
+                        if possession_relative_position(
+                            action.x,
+                            action.y,
+                            actor_team_id=action.actor_team_id,
+                            possession_team_id=action.possession_team_id,
+                        )[0]
+                        is None
+                        else round(
+                            possession_relative_position(
+                                action.x,
+                                action.y,
+                                actor_team_id=action.actor_team_id,
+                                possession_team_id=action.possession_team_id,
+                            )[0],
+                            1,
+                        )
+                    ),
                     "Jersey": action.jersey,
                     "BBox": action.bbox_visible,
                     "Replay": action.replay,
@@ -1141,6 +1262,12 @@ with analysis_tab:
                 for action in possession_v2.actions
             ]
             st.dataframe(pd.DataFrame(timeline_rows), width="stretch", hide_index=True)
+            median_attack_x = attack_view_median_x(possession_v2.actions)
+            if median_attack_x is not None and median_attack_x < 52.5:
+                st.warning(
+                    f"Median x_attack_view của đội kiểm soát = {median_attack_x:.1f} m "
+                    "(< 52.5). Có thể direction FOOTPASS bị đảo."
+                )
             pitch_actions = actions_with_resolved_outcome(
                 possession_v2,
                 shot_outcome=shot_outcome,
@@ -1150,10 +1277,11 @@ with analysis_tab:
                 pitch_actions,
                 heading="Bản đồ event trên sân (mplsoccer)",
                 caption=(
-                    "Tọa độ chuẩn hóa 105 × 68 m. Mỗi điểm là một ObservedActionV2 với chú thích "
-                    "đầy đủ loại hành động, thời điểm, cầu thủ, kết quả (gold/terminal/action), "
-                    "xác suất và provenance."
+                    "Tọa độ possession-relative: mọi điểm cùng hướng tấn công của đội kiểm soát "
+                    "(x → 105). Viền cam = hành động đối phương. "
+                    "Kết quả (gold/terminal/action) và provenance được chú thích tại mỗi điểm."
                 ),
+                attack_relative=True,
             )
 
             video_resolver = load_video_path_resolver()
@@ -1201,9 +1329,20 @@ with analysis_tab:
             )
 
             conclusion_key = f"conclusion_{preview_sequence.attack_id}"
+            window_manifest = st.session_state.get(f"window_manifest_{preview_sequence.attack_id}")
+            can_conclude = attack_v2 is not None
             if openai_api_key_configured():
-                st.caption(f"Kết luận LLM dùng `{openai_model()}` (model rẻ nhất trong allowlist dự án).")
-            if st.button("Đưa ra kết luận", type="primary", key=f"conclude_{preview_sequence.attack_id}"):
+                st.caption(f"Kết luận LLM dùng `{openai_model()}` (model rẻ nhất trong allowlist).")
+            if not DEFAULT_XG_V2_MODEL.is_file():
+                st.caption(f"Thiếu `{DEFAULT_XG_V2_MODEL}` — xG sẽ abstain cho đến khi có artifact local.")
+            if not window_manifest:
+                st.caption("Chạy YOLO trên cửa sổ sự kiện để fusion spatial features vào xG-v2.")
+            if st.button(
+                "Đưa ra kết luận",
+                type="primary",
+                key=f"conclude_{preview_sequence.attack_id}",
+                disabled=not can_conclude,
+            ):
                 if attack_v2 is None:
                     st.session_state[conclusion_key] = {
                         "overview": None,
@@ -1213,13 +1352,40 @@ with analysis_tab:
                                 "Chuỗi này chưa phải Attack-v2 (thiếu terminal shot/header/block hợp lệ).",
                             ),
                         ),
-                        "bundle": None,
-                        "sequence": preview_sequence,
+                        "evidence": None,
+                        "conclusion": None,
                     }
                 else:
-                    overview = attack_v2_research_overview(attack_v2)
-                    bundle = build_bundle(preview_sequence, tactical_ready=tactical.exists())
-                    tools = EvidenceToolRegistry({preview_sequence.attack_id: bundle})
+                    store = load_benchmark_store()
+                    role_benchmarks = store.get_role_benchmark("central_forward", "xg")
+                    web_payload = {"enabled": False, "results": []}
+                    if brave_search_configured():
+                        query = (
+                            f"football {attack_v2.terminal.terminal_type.value} chance quality "
+                            f"{attack_v2.match_id}"
+                        )
+                        web_payload = brave_search_context(query)
+                    web_results = tuple(dict(item) for item in web_payload.get("results") or ())
+                    evidence = build_attack_evidence(
+                        attack_v2,
+                        window_manifest=window_manifest,
+                        xg_model_path=DEFAULT_XG_V2_MODEL if DEFAULT_XG_V2_MODEL.is_file() else None,
+                        team_mapping=default_team_mapping(attack_v2),
+                        allow_research_only=True,
+                        benchmarks=role_benchmarks,
+                        web_context=web_results,
+                    )
+                    overview = attack_v2_research_overview(
+                        attack_v2,
+                        xg_record=evidence.xg_record,
+                        benchmarks=store,
+                    )
+                    legacy_bundle = evidence.as_legacy_bundle()
+                    tools = EvidenceToolRegistry(
+                        {attack_v2.attack_id: legacy_bundle},
+                        benchmarks=store,
+                        web_search=brave_search_context,
+                    )
                     try:
                         if openai_api_key_configured():
                             client: DeterministicEvidenceClient | OpenAIResponsesClient = (
@@ -1231,37 +1397,27 @@ with analysis_tab:
                             )
                         else:
                             client = DeterministicEvidenceClient()
-                        verdict = client.evaluate(bundle, tools)
+                        conclusion_v2 = client.evaluate_v2(legacy_bundle, tools)
                     except Exception as error:
                         LOGGER.exception("Conclusion evaluation failed")
                         st.error(describe_openai_error(error) if openai_api_key_configured() else str(error))
-                        verdict = DeterministicEvidenceClient().evaluate(bundle, tools)
+                        conclusion_v2 = DeterministicEvidenceClient().evaluate_v2(legacy_bundle, tools)
                     st.session_state[conclusion_key] = {
                         "overview": overview,
-                        "verdict": verdict,
-                        "bundle": bundle,
-                        "sequence": preview_sequence,
+                        "evidence": evidence,
+                        "conclusion": conclusion_v2,
+                        "verdict": None,
                     }
 
             conclusion = st.session_state.get(conclusion_key)
             if conclusion:
+                stored_conclusion = conclusion.get("conclusion")
+                stored_evidence = conclusion.get("evidence")
                 overview = conclusion.get("overview")
-                if isinstance(overview, dict):
-                    st.markdown("#### Tóm tắt Attack-v2")
-                    summary_cols = st.columns(4)
-                    summary_cols[0].metric("Terminal", str(overview.get("terminal_type") or "—"))
-                    summary_cols[1].metric("xG", overview.get("xg_status", "unknown"))
-                    summary_cols[2].metric(
-                        "Thời lượng",
-                        f"{float(overview.get('duration_sec') or 0):.1f}s",
-                    )
-                    summary_cols[3].metric("Actions", int(overview.get("action_count") or 0))
-                verdict = conclusion.get("verdict")
-                bundle = conclusion.get("bundle")
-                sequence = conclusion.get("sequence")
-                if verdict is not None and bundle is not None and sequence is not None:
-                    render_verdict(verdict, bundle, sequence)
-                elif verdict is not None:
+                if stored_conclusion is not None and stored_evidence is not None:
+                    render_conclusion_v2(stored_conclusion, stored_evidence, overview if isinstance(overview, dict) else None)
+                elif conclusion.get("verdict") is not None:
+                    verdict = conclusion["verdict"]
                     label, icon = VERDICT_LABELS[verdict.label]
                     st.markdown(f"### {icon} Kết luận: {label}")
                     for limitation in verdict.limitations:
@@ -1274,7 +1430,7 @@ with analysis_tab:
             else:
                 st.info(
                     "Đây là possession/threat research-only, không phải attack; "
-                    "kết luận hiệu quả bị giữ lại cho tới khi có terminal hợp lệ."
+                    "nút kết luận chỉ bật khi có terminal hợp lệ."
                 )
 
             with st.expander("Field-level provenance và state transitions"):

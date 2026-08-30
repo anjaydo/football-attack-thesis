@@ -1,0 +1,284 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any, Mapping
+
+from .attack_features import build_attack_features
+from .fusion import FusionAssociation, FusedXGResult, score_attack_with_observations
+from .models import AttackSequence, AttackSequenceV2, Event, TerminalType
+from .observations import FrameObservation
+from .quality import read_observations_jsonl
+from .research import BenchmarkRecord, EvidenceBundle
+from .xg_v2 import ConfirmedXGRecordV2, TrainedXGModelV2, load_trained_xg_v2_model
+
+
+XG_V2_DEFAULT_RELATIVE = Path("models") / "xg-v2.joblib"
+
+
+@dataclass(frozen=True)
+class AttackEvidenceBundle:
+    """Unified FOOTPASS + YOLO + xG-v2 evidence for research-only conclusions."""
+
+    schema_version: str
+    attack: AttackSequenceV2
+    fusion: FusedXGResult | None
+    xg_record: ConfirmedXGRecordV2 | None
+    withheld_reason: str | None
+    quality_gates: dict[str, bool]
+    quality_metrics: dict[str, float]
+    benchmarks: tuple[BenchmarkRecord, ...]
+    web_context: tuple[dict[str, object], ...]
+    limitations: tuple[str, ...]
+    observations_path: str | None = None
+    xg_release_status: str = "research_only"
+
+    def evidence_ids(self) -> frozenset[str]:
+        ids = set(self.attack.evidence_ids)
+        ids.add(self.attack.attack_id)
+        ids.update(action.action_id for action in self.attack.possession.actions)
+        if self.attack.terminal.action_id:
+            ids.add(self.attack.terminal.action_id)
+        if self.xg_record is not None:
+            ids.add(self.xg_record.record_id)
+            ids.add(f"xg:{self.xg_record.record_id}")
+        if self.fusion is not None:
+            ids.add(self.fusion.association.association_id)
+        ids.update(record.benchmark_id for record in self.benchmarks)
+        for index, snippet in enumerate(self.web_context):
+            ids.add(str(snippet.get("snippet_id") or f"web:{index}"))
+        return frozenset(ids)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "attack": self.attack.to_dict(),
+            "fusion": None if self.fusion is None else self.fusion.to_dict(),
+            "xg_record": None if self.xg_record is None else self.xg_record.to_dict(),
+            "xg_status": "scored" if self.xg_record is not None else "withheld",
+            "xg_probability": None if self.xg_record is None else self.xg_record.xg_probability,
+            "xg_release_status": self.xg_release_status,
+            "withheld_reason": self.withheld_reason,
+            "quality_gates": dict(self.quality_gates),
+            "quality_metrics": dict(self.quality_metrics),
+            "benchmarks": [item.to_dict() for item in self.benchmarks],
+            "web_context": [dict(item) for item in self.web_context],
+            "web_context_limitation": "Web snippets are non-numeric context only.",
+            "limitations": list(self.limitations),
+            "observations_path": self.observations_path,
+            "evidence_ids": sorted(self.evidence_ids()),
+        }
+
+    def as_legacy_bundle(self) -> EvidenceBundle:
+        """Compatibility adapter so existing tool/verify_claims contracts still work."""
+
+        preview = _attack_to_preview_sequence(self.attack)
+        features = build_attack_features(preview)
+        xg_value = 0.0 if self.xg_record is None else float(self.xg_record.xg_probability)
+        extra_ids = tuple(sorted(self.evidence_ids() - set(features.evidence_ids)))
+        features = replace(
+            features,
+            xg_sum=xg_value,
+            xg_max=xg_value,
+            evidence_ids=tuple(features.evidence_ids) + extra_ids,
+        )
+        return EvidenceBundle(
+            attack=features,
+            quality_gates={**self.quality_gates, "xg_scored": self.xg_record is not None},
+            quality_metrics=dict(self.quality_metrics),
+            benchmarks=self.benchmarks,
+            source_ids=(self.attack.attack_id,),
+            limitations=self.limitations,
+        )
+
+
+def default_team_mapping(attack: AttackSequenceV2) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    if attack.team_id:
+        mapping[attack.team_id] = "team_a"
+    other = next(
+        (
+            action.actor_team_id
+            for action in attack.possession.actions
+            if action.actor_team_id and action.actor_team_id != attack.team_id
+        ),
+        None,
+    )
+    if other:
+        mapping[other] = "team_b"
+    return mapping
+
+
+def resolve_xg_v2_model_path(project_root: Path, configured: str | None = None) -> Path:
+    if configured:
+        return Path(configured)
+    return project_root / XG_V2_DEFAULT_RELATIVE
+
+
+def _attack_to_preview_sequence(attack: AttackSequenceV2) -> AttackSequence:
+    events = tuple(
+        Event(
+            timestamp=action.timestamp_sec,
+            event_type=action.action_type,
+            team=attack.team_id,
+            x=action.x,
+            y=action.y,
+            outcome=action.outcome,
+            frame=action.frame,
+            player_id=action.actor_id,
+            jersey=action.jersey,
+            role=action.role,
+            confidence=action.action_probability if action.action_probability is not None else 1.0,
+            source="attack-v2",
+            evidence_id=action.action_id,
+        )
+        for action in attack.possession.actions
+    )
+    return AttackSequence(
+        attack_id=attack.attack_id,
+        team=attack.team_id,
+        start_sec=attack.possession.start_sec,
+        end_sec=attack.possession.end_sec,
+        events=events,
+        match_id=attack.match_id,
+        start_frame=attack.possession.start_frame,
+        end_frame=attack.possession.end_frame,
+        source="attack-v2",
+    )
+
+
+def observations_path_from_manifest(window_manifest: Mapping[str, Any] | None) -> Path | None:
+    if not window_manifest:
+        return None
+    outputs = dict(window_manifest.get("outputs") or {})
+    raw = outputs.get("observations")
+    if not raw:
+        return None
+    path = Path(str(raw))
+    return path if path.is_file() else None
+
+
+def frame_for_terminal(
+    frames: tuple[FrameObservation, ...],
+    terminal_frame: int,
+) -> FrameObservation | None:
+    if not frames:
+        return None
+    exact = next((item for item in frames if item.frame_index == terminal_frame), None)
+    if exact is not None:
+        return exact
+    return min(frames, key=lambda item: abs(item.frame_index - terminal_frame))
+
+
+def _ball_f1_from_manifest(window_manifest: Mapping[str, Any] | None) -> float | None:
+    if not window_manifest:
+        return None
+    quality = dict(window_manifest.get("quality") or {})
+    for key in ("ball_f1", "ball_detection_f1", "ball_f1_score"):
+        if quality.get(key) is not None:
+            return float(quality[key])
+    return None
+
+
+def build_attack_evidence(
+    attack_v2: AttackSequenceV2,
+    *,
+    window_manifest: Mapping[str, Any] | None = None,
+    xg_model_path: Path | None = None,
+    team_mapping: Mapping[str, str] | None = None,
+    allow_research_only: bool = True,
+    benchmarks: tuple[BenchmarkRecord, ...] = (),
+    web_context: tuple[dict[str, object], ...] = (),
+    model: TrainedXGModelV2 | None = None,
+    frames: tuple[FrameObservation, ...] | None = None,
+) -> AttackEvidenceBundle:
+    limitations: list[str] = [
+        "xG-v2 is research_only until FOOTPASS human-domain validation.",
+        "Web search cannot support numeric claims.",
+    ]
+    observations_path = observations_path_from_manifest(window_manifest)
+    loaded_frames = frames
+    if loaded_frames is None and observations_path is not None:
+        loaded_frames = read_observations_jsonl(observations_path)
+    terminal = attack_v2.terminal
+    quality_gates = {
+        "events": True,
+        "attack_v2": True,
+        "shot_terminal": terminal.terminal_type
+        in {TerminalType.SHOT_ATTEMPT, TerminalType.HEADED_ATTEMPT},
+        "yolo_observations": loaded_frames is not None and bool(loaded_frames),
+        "xg_model": False,
+    }
+    quality_metrics: dict[str, float] = {}
+    if window_manifest:
+        quality = dict(window_manifest.get("quality") or {})
+        for key in (
+            "frames_with_ball_ratio",
+            "player_tracking_coverage",
+            "calibrated_position_coverage",
+        ):
+            if quality.get(key) is not None:
+                quality_metrics[key] = float(quality[key])
+    fusion: FusedXGResult | None = None
+    xg_record: ConfirmedXGRecordV2 | None = None
+    withheld = None
+    loaded_model = model
+    if loaded_model is None and xg_model_path is not None and Path(xg_model_path).is_file():
+        loaded_model = load_trained_xg_v2_model(
+            xg_model_path,
+            allow_research_only=allow_research_only,
+        )
+    quality_gates["xg_model"] = loaded_model is not None
+    mapping = dict(team_mapping) if team_mapping else default_team_mapping(attack_v2)
+    if loaded_frames:
+        frame = frame_for_terminal(loaded_frames, terminal.frame)
+        if frame is None:
+            withheld = "terminal_frame_missing"
+            limitations.append("YOLO observations exist but the terminal frame was not found.")
+        else:
+            fusion = score_attack_with_observations(
+                attack_v2,
+                frame,
+                model=loaded_model,
+                team_mapping=mapping,
+                ball_f1=_ball_f1_from_manifest(window_manifest),
+            )
+            xg_record = fusion.xg_record
+            withheld = fusion.withheld_reason
+    elif not quality_gates["shot_terminal"]:
+        withheld = "terminal_not_shot"
+        limitations.append("xG-v2 scores only shot_attempt / headed_attempt terminals.")
+    else:
+        withheld = withheld or "no_yolo_observations"
+        limitations.append("Run the YOLO window on this sequence before scoring fused xG.")
+        if loaded_model is None:
+            withheld = "no_xg_v2_model"
+            limitations.append("models/xg-v2.joblib was not found.")
+    if withheld and xg_record is None:
+        limitations.append(f"xG withheld: {withheld}.")
+    quality_gates["tracking"] = bool(quality_metrics.get("player_tracking_coverage", 0) > 0) or bool(
+        loaded_frames
+    )
+    quality_gates["calibration"] = bool(quality_metrics.get("calibrated_position_coverage", 0) > 0) or bool(
+        loaded_frames
+    )
+    if not loaded_frames:
+        quality_gates["tracking"] = False
+        quality_gates["calibration"] = False
+    return AttackEvidenceBundle(
+        schema_version="attack-evidence-v2/1.0",
+        attack=attack_v2,
+        fusion=fusion,
+        xg_record=xg_record,
+        withheld_reason=withheld,
+        quality_gates=quality_gates,
+        quality_metrics=quality_metrics,
+        benchmarks=benchmarks,
+        web_context=web_context,
+        limitations=tuple(dict.fromkeys(limitations)),
+        observations_path=None if observations_path is None else str(observations_path),
+    )
+
+
+def conclusion_ready(bundle: AttackEvidenceBundle) -> bool:
+    return bool(bundle.quality_gates.get("attack_v2"))

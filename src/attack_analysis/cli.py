@@ -129,6 +129,7 @@ COMMANDS = {
     "build-footpass-benchmarks",
     "build-historical-snapshot",
     "attack-v2-overview",
+    "serve-mcp",
 }
 
 
@@ -587,6 +588,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     demo_parser = subparsers.add_parser("serve-demo", help="Launch the local Streamlit thesis demo")
     demo_parser.add_argument("--port", type=int, default=8501)
+
+    mcp_parser = subparsers.add_parser(
+        "serve-mcp",
+        help="Serve Attack-v2 evidence tools over MCP stdio (Brave + frozen benchmarks)",
+    )
+    mcp_parser.add_argument("--bundle", type=Path, help="EvidenceBundle JSON for get_attack_evidence")
+    mcp_parser.add_argument("--benchmarks", type=Path)
 
     benchmark_parser = subparsers.add_parser(
         "build-footpass-benchmarks", help="Build a frozen per-90 role benchmark snapshot from tactical HDF5"
@@ -1304,6 +1312,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             check=False,
         )
         result = {"exit_code": completed.returncode, "app": str(app_path)}
+    elif args.command == "serve-mcp":
+        from .mcp_server import serve_mcp_stdio
+
+        serve_mcp_stdio(bundle_path=args.bundle, benchmarks_path=args.benchmarks)
+        result = {"status": "stopped"}
     elif args.command == "build-footpass-benchmarks":
         records = build_footpass_role_benchmarks(
             args.tactical_h5,

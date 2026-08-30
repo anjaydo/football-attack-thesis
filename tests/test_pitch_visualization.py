@@ -66,6 +66,38 @@ class PitchVisualizationTests(unittest.TestCase):
         finally:
             figure.clear()
 
+    def test_attack_relative_plot_keeps_opponent_on_same_half(self) -> None:
+        from attack_analysis.pitch_visualization import pitch_event_views
+
+        possession = ObservedActionV2(
+            match_id="game_1",
+            period=1,
+            frame=1,
+            timestamp_sec=1.0,
+            action_type="pass",
+            source_tier=SourceTier.ORACLE_ACTIONS_ORACLE_TACTICAL,
+            actor_team_id="A",
+            possession_team_id="A",
+            x=84.0,
+            y=34.0,
+        )
+        opponent = ObservedActionV2(
+            match_id="game_1",
+            period=1,
+            frame=2,
+            timestamp_sec=1.2,
+            action_type="tackle",
+            source_tier=SourceTier.ORACLE_ACTIONS_ORACLE_TACTICAL,
+            actor_team_id="B",
+            possession_team_id="A",
+            x=21.0,
+            y=34.0,
+        )
+        views = pitch_event_views((possession, opponent), attack_relative=True)
+        self.assertAlmostEqual(views[0].x, 84.0)
+        self.assertAlmostEqual(views[1].x, 84.0)
+        self.assertTrue(views[1].opponent)
+
     def test_rejects_attack_without_pitch_coordinates(self) -> None:
         sequence = AttackSequence(
             attack_id="game_1_H1:attack-0002",

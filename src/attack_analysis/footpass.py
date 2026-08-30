@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
 import re
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from .attack_v2 import AttackV2DecodeResult, FootpassAttackV2Config, decode_footpass_attack_v2
 from .footpass_terminal_inference import (
@@ -79,6 +79,64 @@ def normalize_footpass_position(
     x = (1.0 - raw_x) * PITCH_LENGTH if direction_flag == 1 else raw_x * PITCH_LENGTH
     y = raw_y * PITCH_WIDTH
     return min(PITCH_LENGTH, max(0.0, x)), min(PITCH_WIDTH, max(0.0, y))
+
+
+def possession_relative_position(
+    raw_x: float | None,
+    raw_y: float | None,
+    *,
+    actor_team_id: str | None,
+    possession_team_id: str | None,
+) -> tuple[float | None, float | None]:
+    """Keep one possession on a single attacking axis.
+
+    Each FOOTPASS actor is independently mirrored so *that* team attacks
+    toward x=105. Opponent actions therefore jump to the opposite half in
+    the same possession. Remirror opponent X into the possession team's view.
+    """
+
+    if raw_x is None or raw_y is None:
+        return None, None
+    if not actor_team_id or not possession_team_id or actor_team_id == possession_team_id:
+        return raw_x, raw_y
+    return min(PITCH_LENGTH, max(0.0, PITCH_LENGTH - raw_x)), raw_y
+
+
+def actions_in_attack_view(actions: Sequence[ObservedActionV2]) -> tuple[ObservedActionV2, ...]:
+    """Return copies whose x/y sit in the possession team's attacking direction."""
+
+    from dataclasses import replace
+
+    remapped: list[ObservedActionV2] = []
+    for action in actions:
+        x, y = possession_relative_position(
+            action.x,
+            action.y,
+            actor_team_id=action.actor_team_id,
+            possession_team_id=action.possession_team_id,
+        )
+        remapped.append(replace(action, x=x, y=y))
+    return tuple(remapped)
+
+
+def attack_view_median_x(actions: Sequence[ObservedActionV2]) -> float | None:
+    xs = [
+        possession_relative_position(
+            action.x,
+            action.y,
+            actor_team_id=action.actor_team_id,
+            possession_team_id=action.possession_team_id,
+        )[0]
+        for action in actions
+        if action.possession_team_id
+        and action.actor_team_id == action.possession_team_id
+        and action.x is not None
+    ]
+    values = [item for item in xs if item is not None]
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2]
 
 
 @dataclass(frozen=True)

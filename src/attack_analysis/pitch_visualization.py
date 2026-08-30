@@ -8,6 +8,7 @@ from typing import Any
 from matplotlib.lines import Line2D
 from mplsoccer import Pitch
 
+from .footpass import actions_in_attack_view
 from .models import AttackSequence, Event, ObservedActionV2, PITCH_LENGTH, PITCH_WIDTH
 
 
@@ -54,6 +55,7 @@ class PitchEventView:
     annotation: str
     end_x: float | None = None
     end_y: float | None = None
+    opponent: bool = False
 
 
 def _action_label(action_type: str) -> str:
@@ -196,17 +198,35 @@ def _view_from_event(index: int, event: Event) -> PitchEventView | None:
 def _view_from_action(index: int, action: ObservedActionV2) -> PitchEventView | None:
     if action.x is None or action.y is None:
         return None
+    opponent = bool(
+        action.possession_team_id
+        and action.actor_team_id
+        and action.actor_team_id != action.possession_team_id
+    )
     return PitchEventView(
         x=float(action.x),
         y=float(action.y),
         action_type=action.action_type,
         annotation=_observed_annotation(index, action),
+        opponent=opponent,
     )
 
 
-def pitch_event_views(items: Sequence[Event | ObservedActionV2]) -> tuple[PitchEventView, ...]:
+def pitch_event_views(
+    items: Sequence[Event | ObservedActionV2],
+    *,
+    attack_relative: bool = True,
+) -> tuple[PitchEventView, ...]:
+    prepared: list[Event | ObservedActionV2]
+    actions = [item for item in items if isinstance(item, ObservedActionV2)]
+    if attack_relative and actions:
+        remapped = actions_in_attack_view(tuple(actions))
+        iterator = iter(remapped)
+        prepared = [next(iterator) if isinstance(item, ObservedActionV2) else item for item in items]
+    else:
+        prepared = list(items)
     views: list[PitchEventView] = []
-    for item in items:
+    for item in prepared:
         index = len(views) + 1
         if isinstance(item, ObservedActionV2):
             view = _view_from_action(index, item)
@@ -265,10 +285,14 @@ def _draw_sequence_arrows(pitch: Pitch, ax: Any, views: Sequence[PitchEventView]
         )
 
 
-def plot_pitch_events(items: Sequence[Event | ObservedActionV2]) -> Any:
+def plot_pitch_events(
+    items: Sequence[Event | ObservedActionV2],
+    *,
+    attack_relative: bool = True,
+) -> Any:
     """Plot event points on a metric 105 x 68 m mplsoccer pitch with full labels."""
 
-    views = pitch_event_views(items)
+    views = pitch_event_views(items, attack_relative=attack_relative)
     if not views:
         raise ValueError("attack has no pitch coordinates to plot")
 
@@ -312,8 +336,8 @@ def plot_pitch_events(items: Sequence[Event | ObservedActionV2]) -> Any:
             s=size,
             marker=marker,
             c=color,
-            edgecolors="#ffffff",
-            linewidth=1.8,
+            edgecolors="#f97316" if view.opponent else "#ffffff",
+            linewidth=2.2 if view.opponent else 1.8,
             zorder=4,
         )
         ax.text(
@@ -390,8 +414,12 @@ def plot_pitch_events(items: Sequence[Event | ObservedActionV2]) -> Any:
     return figure
 
 
-def plot_attack_pitch(sequence: AttackSequence | Sequence[Event | ObservedActionV2]) -> Any:
+def plot_attack_pitch(
+    sequence: AttackSequence | Sequence[Event | ObservedActionV2],
+    *,
+    attack_relative: bool = True,
+) -> Any:
     """Plot events on a metric 105 x 68 metre mplsoccer pitch."""
 
     items = sequence.events if isinstance(sequence, AttackSequence) else sequence
-    return plot_pitch_events(items)
+    return plot_pitch_events(items, attack_relative=attack_relative)

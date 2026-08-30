@@ -47,14 +47,16 @@ oracle-assisted hiện tại chỉ là audit hạ tầng, không phải accuracy
 | Carry/pass/turnover | Hoàn thành baseline | Unit + CLI | Có physical transfer gate |
 | Shot candidate | Hoàn thành baseline | Unit | `shot_candidate` chưa xác minh; không terminal/xG |
 | Geometry-only xG | Legacy ablation | Unit | Không được gắn vào Attack-v2 output |
-| xG-v2 | Hạ tầng + trainer hoàn thành | Unit + StatsBomb run | Chưa có FOOTPASS human-domain validation |
+| xG-v2 | Hạ tầng + Streamlit fusion | Unit + StatsBomb; research_only UI | `models/xg-v2.joblib` local (gitignored); chưa human-domain validation |
 | Attack-v2 decoder | Hoàn thành deterministic baseline | Unit + real FOOTPASS audit | Strict terminal; chưa human-GT accuracy |
 | TCN/semi-Markov | Hạ tầng hoàn thành | Unit + Torch smoke | `infrastructure_untrained` |
 | Effectiveness scoring | Legacy bị khóa | Unit | Không categorical verdict trước ≥300 confirmed labels + gates |
 | Sequence evaluation | Hoàn thành | Unit | Hungarian, tIoU .25/.5/.75, 2k match bootstrap |
 | Tracking evaluation | Hoàn thành | Unit | AP50-compatible, IDF1, HOTA, team/jersey, ball, GS-HOTA-style |
 | One-command orchestration | Hoàn thành | Integration backend giả | `run-pipeline` + manifest |
-| LLM grounded explanation | Legacy-only | Unit | Không được gọi cho censored/non-attack v2 |
+| LLM grounded explanation | Attack-v2 conclusion rewrite | Unit | `attack-verdict-v2`: chance quality + tactical read; abstain effectiveness |
+| FOOTPASS+YOLO fusion | Wired vào kết luận | Unit | `attack_evidence.py` đọc observations.jsonl, score xG-v2 |
+| Brave Search + MCP tools | Hoàn thành | Unit | Context-only web; `attack-analysis serve-mcp` |
 | SoccerNet GSR sequence | Hoàn thành | Real-data verified | `SNGS-033`, 750 frame + GSR labels v1.3 |
 | Real YOLO inference | Đã xác minh preview | Real video | 50 frame ở 1920x1080, inference size 1280, CPU |
 
