@@ -82,6 +82,37 @@ class FootpassResearchTests(unittest.TestCase):
         self.assertEqual(fake_model.features["foe_players"], 11)
         self.assertEqual(events[0].xg_inputs["foe_players"], 11)
         self.assertNotIn("goal", events[0].xg_inputs)
+        self.assertEqual(events[0].xg_inputs["observed_players"], 22)
+
+    def test_freeze_frame_counts_role_one_as_goalkeeper(self) -> None:
+        try:
+            import h5py
+            import numpy as np
+        except ImportError:
+            self.skipTest("FOOTPASS test dependencies are not installed")
+        from attack_analysis.footpass import footpass_freeze_frame
+
+        rows = np.zeros((22, 14), dtype=float)
+        rows[:, 0] = 25
+        rows[:, 1] = np.arange(22)
+        rows[:11, 2] = 1
+        rows[11:, 2] = 0
+        rows[:, 3] = np.tile(np.arange(1, 12), 2)
+        rows[:, 4] = 2
+        rows[11, 4] = 1
+        rows[:11, 5] = 0.2
+        rows[11:, 5] = 0.02
+        rows[:, 6] = 0.5
+        freeze = footpass_freeze_frame(
+            rows,
+            attacking_direction=1,
+            shooter_x=21.0,
+            shooter_y=34.0,
+            timestamp=1.0,
+        )
+        self.assertEqual(freeze["foe_players"], 11)
+        self.assertIsNotNone(freeze["x_goalkeeper"])
+        self.assertEqual(sum(1 for item in freeze["players"] if item["is_goalkeeper"]), 1)
 
     def test_builds_anonymous_frozen_role_benchmarks(self) -> None:
         try:

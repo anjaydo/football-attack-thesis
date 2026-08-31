@@ -48,6 +48,22 @@ class FieldGeometryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             FieldLineConfig(min_length_ratio=0).validate()
 
+    def test_video_only_projector_from_pitch_polygon(self) -> None:
+        from attack_analysis.geometry import ordered_image_quad, projector_from_pitch_polygon
+
+        polygon = ((100.0, 400.0), (500.0, 400.0), (400.0, 100.0), (200.0, 100.0))
+        quad = ordered_image_quad(polygon)
+        self.assertIsNotNone(quad)
+        near_left, near_right, far_right, far_left = quad
+        self.assertEqual(near_left, (100.0, 400.0))
+        self.assertEqual(near_right, (500.0, 400.0))
+        projector = projector_from_pitch_polygon(polygon)
+        self.assertIsNotNone(projector)
+        x, y = projector.project((300.0, 400.0))
+        self.assertAlmostEqual(x, 52.5, places=1)
+        self.assertAlmostEqual(y, 0.0, places=1)
+        self.assertIsNone(projector_from_pitch_polygon(((0.0, 0.0), (1.0, 1.0), (2.0, 0.0))))
+
 
 if __name__ == "__main__":
     unittest.main()

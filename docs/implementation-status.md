@@ -55,7 +55,7 @@ oracle-assisted hiện tại chỉ là audit hạ tầng, không phải accuracy
 | Tracking evaluation | Hoàn thành | Unit | AP50-compatible, IDF1, HOTA, team/jersey, ball, GS-HOTA-style |
 | One-command orchestration | Hoàn thành | Integration backend giả | `run-pipeline` + manifest |
 | LLM grounded explanation | Attack-v2 conclusion rewrite | Unit | `attack-verdict-v2`: chance quality + tactical read; abstain effectiveness |
-| FOOTPASS+YOLO fusion | Wired vào kết luận | Unit | `attack_evidence.py` đọc observations.jsonl, score xG-v2 |
+| FOOTPASS+YOLO fusion | Freeze-frame HDF5 + YOLO overlay vào kết luận | Unit | Spatial card; xG-v2 đọc oracle counts khi có tactical |
 | Brave Search + MCP tools | Hoàn thành | Unit | Context-only web; `attack-analysis serve-mcp` |
 | SoccerNet GSR sequence | Hoàn thành | Real-data verified | `SNGS-033`, 750 frame + GSR labels v1.3 |
 | Real YOLO inference | Đã xác minh preview | Real video | 50 frame ở 1920x1080, inference size 1280, CPU |

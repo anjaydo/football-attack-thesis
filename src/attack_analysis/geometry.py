@@ -93,3 +93,61 @@ def projector_confidence(
         value = resolver(frame_index)
         return None if value is None else min(1.0, max(0.0, float(value)))
     return 1.0
+
+
+VIDEO_ONLY_CALIBRATION_CONFIDENCE = 0.25
+
+
+def ordered_image_quad(
+    polygon: Sequence[Point],
+) -> tuple[Point, Point, Point, Point] | None:
+    """Order a visible-pitch polygon as near-left, near-right, far-right, far-left.
+
+    Near is the larger image-y (bottom of the frame). This is a video-only
+    estimate: sideline y=0 vs y=68 may still be flipped relative to the
+    FIFA axis, and the grass contour is not a semantic landmark set.
+    """
+
+    if len(polygon) < 4:
+        return None
+    points = [(float(x), float(y)) for x, y in polygon]
+    by_y = sorted(points, key=lambda item: item[1])
+    mid_y = by_y[len(by_y) // 2][1]
+    top = [item for item in points if item[1] <= mid_y]
+    bottom = [item for item in points if item[1] > mid_y]
+    if len(top) < 2 or len(bottom) < 2:
+        top = by_y[:2]
+        bottom = by_y[-2:]
+    far_left = min(top, key=lambda item: item[0])
+    far_right = max(top, key=lambda item: item[0])
+    near_left = min(bottom, key=lambda item: item[0])
+    near_right = max(bottom, key=lambda item: item[0])
+    if far_left[0] == far_right[0] or near_left[0] == near_right[0]:
+        return None
+    return near_left, near_right, far_right, far_left
+
+
+def projector_from_pitch_polygon(
+    polygon: Sequence[Point],
+    *,
+    pitch_length: float = 105.0,
+    pitch_width: float = 68.0,
+) -> PitchProjector | None:
+    """Homography from a grass-mask quad onto a 105×68 m pitch (research baseline)."""
+
+    quad = ordered_image_quad(polygon)
+    if quad is None:
+        return None
+    near_left, near_right, far_right, far_left = quad
+    try:
+        return PitchProjector.from_points(
+            [near_left, near_right, far_right, far_left],
+            [
+                (0.0, 0.0),
+                (pitch_length, 0.0),
+                (pitch_length, pitch_width),
+                (0.0, pitch_width),
+            ],
+        )
+    except ValueError:
+        return None

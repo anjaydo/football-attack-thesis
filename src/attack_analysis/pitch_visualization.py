@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +10,23 @@ from mplsoccer import Pitch
 
 from .footpass import actions_in_attack_view
 from .models import AttackSequence, Event, ObservedActionV2, PITCH_LENGTH, PITCH_WIDTH
+
+COCO_SKELETON = (
+    (5, 6),
+    (5, 7),
+    (7, 9),
+    (6, 8),
+    (8, 10),
+    (5, 11),
+    (6, 12),
+    (11, 12),
+    (11, 13),
+    (13, 15),
+    (12, 14),
+    (14, 16),
+    (0, 5),
+    (0, 6),
+)
 
 
 ACTION_COLORS = {
@@ -412,6 +429,213 @@ def plot_pitch_events(
     )
     figure.subplots_adjust(left=0.02, right=0.98, top=0.94, bottom=0.12)
     return figure
+
+
+def plot_freeze_frame(
+    players: Sequence[Mapping[str, Any]],
+    *,
+    x_shooter: float | None = None,
+    y_shooter: float | None = None,
+    x_goalkeeper: float | None = None,
+    y_goalkeeper: float | None = None,
+    events: Sequence[Mapping[str, Any]] = (),
+    yolo_shooter: Mapping[str, Any] | None = None,
+    shooter_keypoints: Sequence[Mapping[str, Any]] = (),
+    shooter_bbox: Mapping[str, Any] | None = None,
+) -> Any:
+    """Plot a possession-relative freeze-frame (shooter, GK, allies, foes)."""
+
+    pitch = Pitch(
+        pitch_type="custom",
+        pitch_length=PITCH_LENGTH,
+        pitch_width=PITCH_WIDTH,
+        pitch_color="#123a2d",
+        line_color="#e2eee9",
+        linewidth=1.5,
+        stripe=True,
+        stripe_color="#174735",
+        corner_arcs=True,
+    )
+    figure, ax = pitch.draw(figsize=(11.5, 7.4))
+    figure.patch.set_facecolor("#0e3026")
+    for item in players:
+        x = item.get("x")
+        y = item.get("y")
+        if x is None or y is None:
+            continue
+        side = str(item.get("side") or "ally")
+        is_gk = bool(item.get("is_goalkeeper"))
+        is_shooter = bool(item.get("is_shooter"))
+        color = "#fb4b4e" if side == "foe" else "#38bdf8"
+        if is_gk:
+            color = "#facc15"
+        marker = "*" if is_shooter else "s" if is_gk else "o"
+        size = 420 if is_shooter else 260 if is_gk else 90
+        pitch.scatter(
+            float(x),
+            float(y),
+            ax=ax,
+            s=size,
+            marker=marker,
+            c=color,
+            edgecolors="#ffffff",
+            linewidth=1.4,
+            zorder=4,
+        )
+    event_views = [item for item in events if item.get("x") is not None and item.get("y") is not None]
+    for start, end in zip(event_views, event_views[1:]):
+        ax.plot(
+            [float(start["x"]), float(end["x"])],
+            [float(start["y"]), float(end["y"])],
+            color="#f8fafc",
+            alpha=0.45,
+            linewidth=1.3,
+            zorder=3,
+        )
+    for index, item in enumerate(event_views, start=1):
+        color = ACTION_COLORS.get(str(item.get("action_type")), "#e2e8f0")
+        ax.scatter(
+            float(item["x"]),
+            float(item["y"]),
+            s=36,
+            c=color,
+            edgecolors="#ffffff",
+            linewidths=0.8,
+            zorder=5,
+        )
+        ax.text(
+            float(item["x"]),
+            float(item["y"]) + 1.6,
+            str(index),
+            color="#ffffff",
+            fontsize=7,
+            ha="center",
+            va="bottom",
+            zorder=6,
+        )
+    if yolo_shooter and yolo_shooter.get("x") is not None and yolo_shooter.get("y") is not None:
+        ax.scatter(
+            float(yolo_shooter["x"]),
+            float(yolo_shooter["y"]),
+            s=180,
+            facecolors="none",
+            edgecolors="#22d3ee",
+            linewidths=2.0,
+            marker="o",
+            zorder=7,
+            label="YOLO shooter",
+        )
+    _draw_pose_on_pitch(ax, shooter_keypoints)
+    if x_shooter is not None and y_shooter is not None and x_goalkeeper is not None and y_goalkeeper is not None:
+        ax.plot(
+            [float(x_shooter), float(x_goalkeeper)],
+            [float(y_shooter), float(y_goalkeeper)],
+            color="#fde68a",
+            linestyle="--",
+            linewidth=1.4,
+            zorder=3,
+        )
+    _draw_pose_inset(figure, shooter_keypoints, shooter_bbox)
+    legend = ax.legend(
+        handles=[
+            Line2D([0], [0], marker="*", color="none", markerfacecolor="#38bdf8", markeredgecolor="#ffffff", markersize=12, label="Người sút"),
+            Line2D([0], [0], marker="s", color="none", markerfacecolor="#facc15", markeredgecolor="#ffffff", markersize=10, label="Thủ môn đối phương"),
+            Line2D([0], [0], marker="o", color="none", markerfacecolor="#38bdf8", markeredgecolor="#ffffff", markersize=8, label="Đồng đội"),
+            Line2D([0], [0], marker="o", color="none", markerfacecolor="#fb4b4e", markeredgecolor="#ffffff", markersize=8, label="Đối phương"),
+            Line2D([0], [0], marker="o", color="none", markerfacecolor="none", markeredgecolor="#22d3ee", markersize=9, label="YOLO track"),
+            Line2D([0], [0], color="#7dd3fc", linewidth=1.6, label="Pose trên sân"),
+        ],
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.04),
+        ncol=6,
+        frameon=False,
+        fontsize=9,
+    )
+    for text in legend.get_texts():
+        text.set_color("#ffffff")
+    ax.annotate(
+        "HƯỚNG TẤN CÔNG  →",
+        xy=(0.98, 1.025),
+        xycoords="axes fraction",
+        color="#ffffff",
+        fontsize=10,
+        fontweight="bold",
+        ha="right",
+        va="bottom",
+    )
+    figure.subplots_adjust(left=0.02, right=0.98, top=0.94, bottom=0.12)
+    return figure
+
+
+def _draw_pose_on_pitch(ax: Any, keypoints: Sequence[Mapping[str, Any]]) -> None:
+    located = {
+        int(item["index"]): item
+        for item in keypoints
+        if "index" in item and item.get("pitch_x") is not None and item.get("pitch_y") is not None
+    }
+    if len(located) < 2:
+        return
+    for start, end in COCO_SKELETON:
+        if start not in located or end not in located:
+            continue
+        ax.plot(
+            [float(located[start]["pitch_x"]), float(located[end]["pitch_x"])],
+            [float(located[start]["pitch_y"]), float(located[end]["pitch_y"])],
+            color="#7dd3fc",
+            linewidth=1.5,
+            alpha=0.9,
+            zorder=8,
+        )
+    ax.scatter(
+        [float(item["pitch_x"]) for item in located.values()],
+        [float(item["pitch_y"]) for item in located.values()],
+        s=18,
+        c="#fde68a",
+        edgecolors="#0e3026",
+        linewidths=0.4,
+        zorder=9,
+    )
+
+
+def _draw_pose_inset(
+    figure: Any,
+    keypoints: Sequence[Mapping[str, Any]],
+    bbox: Mapping[str, Any] | None,
+) -> None:
+    if not keypoints:
+        return
+    by_index = {int(item["index"]): item for item in keypoints if "index" in item}
+    xs = [float(item["x"]) for item in keypoints]
+    ys = [float(item["y"]) for item in keypoints]
+    if bbox:
+        xs.extend([float(bbox["x1"]), float(bbox["x2"])])
+        ys.extend([float(bbox["y1"]), float(bbox["y2"])])
+    pad = 8.0
+    inset = figure.add_axes((0.04, 0.16, 0.16, 0.28))
+    inset.set_facecolor("#071a14")
+    for start, end in COCO_SKELETON:
+        if start not in by_index or end not in by_index:
+            continue
+        inset.plot(
+            [float(by_index[start]["x"]), float(by_index[end]["x"])],
+            [float(by_index[start]["y"]), float(by_index[end]["y"])],
+            color="#7dd3fc",
+            linewidth=1.4,
+        )
+    inset.scatter(
+        [float(item["x"]) for item in keypoints],
+        [float(item["y"]) for item in keypoints],
+        s=12,
+        c="#fde68a",
+        zorder=3,
+    )
+    inset.set_xlim(min(xs) - pad, max(xs) + pad)
+    inset.set_ylim(max(ys) + pad, min(ys) - pad)
+    inset.set_xticks([])
+    inset.set_yticks([])
+    for spine in inset.spines.values():
+        spine.set_color("#38bdf8")
+    inset.set_title("YOLO pose", color="#e2e8f0", fontsize=7, pad=2)
 
 
 def plot_attack_pitch(

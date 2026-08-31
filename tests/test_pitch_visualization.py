@@ -109,6 +109,35 @@ class PitchVisualizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no pitch coordinates"):
             plot_attack_pitch(sequence)
 
+    def test_freeze_frame_draws_event_trail_and_pose_inset(self) -> None:
+        from attack_analysis.pitch_visualization import plot_freeze_frame
+
+        figure = plot_freeze_frame(
+            [
+                {"side": "ally", "x": 90.0, "y": 34.0, "is_shooter": True, "is_goalkeeper": False},
+                {"side": "foe", "x": 102.0, "y": 34.0, "is_shooter": False, "is_goalkeeper": True},
+            ],
+            x_shooter=90.0,
+            y_shooter=34.0,
+            x_goalkeeper=102.0,
+            y_goalkeeper=34.0,
+            events=(
+                {"action_type": "pass", "x": 70.0, "y": 40.0},
+                {"action_type": "shot", "x": 90.0, "y": 34.0, "is_terminal": True},
+            ),
+            yolo_shooter={"x": 90.4, "y": 34.2},
+            shooter_keypoints=(
+                {"index": 0, "x": 20.0, "y": 10.0, "confidence": 0.9, "pitch_x": 90.0, "pitch_y": 32.0},
+                {"index": 5, "x": 18.0, "y": 22.0, "confidence": 0.8, "pitch_x": 89.5, "pitch_y": 33.0},
+                {"index": 6, "x": 22.0, "y": 22.0, "confidence": 0.8, "pitch_x": 90.5, "pitch_y": 33.0},
+            ),
+            shooter_bbox={"x1": 10.0, "y1": 8.0, "x2": 30.0, "y2": 50.0},
+        )
+        try:
+            self.assertGreaterEqual(len(figure.axes), 2)
+        finally:
+            figure.clear()
+
 
 if __name__ == "__main__":
     unittest.main()

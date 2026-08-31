@@ -100,6 +100,55 @@ class AttackEvidenceTests(unittest.TestCase):
             575,
         )
 
+    def test_freeze_frame_without_yolo_uses_tactical_counts(self) -> None:
+        attack = decode_footpass_attack_v2(
+            [_action(1.0, "pass", "A", x=70.0), _action(2.0, "shot", "A")]
+        ).attacks[0]
+        freeze = {
+            "x_shooter": 90.0,
+            "y_shooter": 34.0,
+            "x_goalkeeper": 102.0,
+            "y_goalkeeper": 34.0,
+            "foe_players": 8,
+            "ally_players": 9,
+            "defending_players": 1,
+            "under_pressure": 1,
+            "observed_players": 18,
+            "gk_distance_m": 12.0,
+            "evidence_id": "footpass-hdf5:game_18_H1:50:freeze",
+        }
+        result = score_attack_with_observations(attack, None, footpass_freeze=freeze)
+        self.assertEqual(result.association.method, "footpass_tactical")
+        self.assertEqual(result.association.xg_raw["foe_players"], 8)
+        self.assertEqual(result.association.spatial_context["provenance"]["x_goalkeeper"], "footpass_tactical")
+        evidence = build_attack_evidence(
+            attack,
+            frames=(
+                FrameObservation(
+                    frame_index=50,
+                    timestamp_sec=2.0,
+                    objects=(_player("a1", "team_a", 90.0, 34.0),),
+                ),
+            ),
+        )
+        legacy = evidence.as_legacy_bundle()
+        self.assertIsNotNone(legacy.xg_raw)
+        self.assertIn("play_pattern", legacy.xg_raw)
+
+    def test_scores_location_only_xg_without_yolo_or_freeze(self) -> None:
+        attack = decode_footpass_attack_v2(
+            [_action(1.0, "pass", "A", x=70.0), _action(2.0, "shot", "A")]
+        ).attacks[0]
+        evidence = build_attack_evidence(attack)
+        self.assertIsNotNone(evidence.fusion)
+        self.assertEqual(evidence.fusion.association.method, "event_location")
+        self.assertEqual(evidence.fusion.association.xg_raw["x_shooter"], 90.0)
+        self.assertEqual(evidence.withheld_reason, "no_xg_v2_model")
+        self.assertNotEqual(evidence.withheld_reason, "no_yolo_observations")
+        self.assertTrue(
+            any("location" in item.lower() or "missingness" in item.lower() for item in evidence.limitations)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

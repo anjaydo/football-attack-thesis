@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from dataclasses import dataclass
-from math import isfinite
+from math import hypot, isfinite
 from pathlib import Path
 import re
 from typing import Any, Iterable, Mapping, Sequence
@@ -24,7 +24,7 @@ from .models import (
     PITCH_WIDTH,
     SourceTier,
 )
-from .xg import TrainedXGModel, heuristic_xg, load_trained_xg_model, shot_angle, shot_distance
+from .xg import GOAL_CENTER_Y, TrainedXGModel, heuristic_xg, load_trained_xg_model, shot_angle, shot_distance
 
 
 FOOTPASS_ACTIONS = {
@@ -55,6 +55,28 @@ FOOTPASS_ROLES = {
 }
 
 _FOOTPASS_MATCH_KEY = re.compile(r"^(?P<match>.+)_H(?P<period>[1-9][0-9]*)$")
+PENALTY_BOX_DEPTH_M = 16.5
+PENALTY_BOX_WIDTH_M = 40.32
+SHOT_CORRIDOR_M = 1.5
+_FOOTPASS_SHOT_XG_KEYS = (
+    "x_shooter",
+    "y_shooter",
+    "shot_angle",
+    "distance_to_goal",
+    "x_goalkeeper",
+    "y_goalkeeper",
+    "foe_players",
+    "ally_players",
+    "defending_players",
+    "under_pressure",
+    "observed_players",
+    "is_regular_play",
+    "is_counter",
+    "is_dead_ball",
+    "is_penalty",
+    "minute",
+    "second",
+)
 
 
 def split_footpass_match_key(match_key: str) -> tuple[str, int]:
@@ -572,6 +594,127 @@ def footpass_v2_summary(
     return summary
 
 
+def _distance_to_segment(
+    px: float,
+    py: float,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+) -> float:
+    dx = x2 - x1
+    dy = y2 - y1
+    length2 = dx * dx + dy * dy
+    if length2 <= 1e-12:
+        return hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / length2))
+    return hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def _in_attacking_penalty_box(x: float, y: float) -> bool:
+    half = PENALTY_BOX_WIDTH_M / 2.0
+    return x >= PITCH_LENGTH - PENALTY_BOX_DEPTH_M and abs(y - GOAL_CENTER_Y) <= half
+
+
+def footpass_freeze_frame(
+    frame_rows: Any,
+    *,
+    attacking_direction: int,
+    shooter_x: float,
+    shooter_y: float,
+    timestamp: float,
+) -> dict[str, object]:
+    """Oracle 11v11 snapshot at one tactical frame, in possession-relative metres."""
+
+    from .xg_data import PRESSURE_RADIUS_M
+
+    visible: list[tuple[int, int, float, float]] = []
+    for row in frame_rows:
+        raw_x, raw_y = float(row[5]), float(row[6])
+        if raw_x != raw_x or raw_y != raw_y:
+            continue
+        x, y = normalize_footpass_position(raw_x, raw_y, attacking_direction)
+        visible.append((int(row[2]), int(row[4]), x, y))
+    opponents = [item for item in visible if item[0] != attacking_direction]
+    allies = [item for item in visible if item[0] == attacking_direction]
+    goalkeeper = next((item for item in opponents if item[1] == 1), None)
+    nearby_defenders = sum(
+        item[1] != 1
+        and hypot(item[2] - shooter_x, item[3] - shooter_y) <= PRESSURE_RADIUS_M
+        for item in opponents
+    )
+    shooter_index = None
+    best = None
+    for index, item in enumerate(allies):
+        distance = hypot(item[2] - shooter_x, item[3] - shooter_y)
+        if best is None or distance < best:
+            best = distance
+            shooter_index = index
+    point = (shooter_x, shooter_y)
+    gk_distance = None
+    if goalkeeper is not None:
+        gk_distance = hypot(goalkeeper[2] - shooter_x, goalkeeper[3] - shooter_y)
+    players: list[dict[str, object]] = []
+    for index, item in enumerate(allies):
+        players.append(
+            {
+                "side": "ally",
+                "role": FOOTPASS_ROLES.get(item[1], f"role_{item[1]}"),
+                "x": item[2],
+                "y": item[3],
+                "is_goalkeeper": item[1] == 1,
+                "is_shooter": index == shooter_index,
+            }
+        )
+    for item in opponents:
+        players.append(
+            {
+                "side": "foe",
+                "role": FOOTPASS_ROLES.get(item[1], f"role_{item[1]}"),
+                "x": item[2],
+                "y": item[3],
+                "is_goalkeeper": item[1] == 1,
+                "is_shooter": False,
+            }
+        )
+    ally_count = max(0, len(allies) - 1)
+    foe_count = len(opponents)
+    observed = 1 + ally_count + foe_count if visible else None
+    return {
+        "x_shooter": shooter_x,
+        "y_shooter": shooter_y,
+        "shot_angle": shot_angle(point),
+        "distance_to_goal": shot_distance(point),
+        "x_goalkeeper": goalkeeper[2] if goalkeeper else None,
+        "y_goalkeeper": goalkeeper[3] if goalkeeper else None,
+        "foe_players": foe_count,
+        "ally_players": ally_count,
+        "defending_players": nearby_defenders,
+        "under_pressure": int(nearby_defenders > 0),
+        "observed_players": observed,
+        "defenders_in_box": sum(1 for item in opponents if _in_attacking_penalty_box(item[2], item[3])),
+        "allies_ahead": sum(1 for item in allies if item[2] > shooter_x + 0.5),
+        "foes_in_shot_corridor": sum(
+            1
+            for item in opponents
+            if item[1] != 1
+            and _distance_to_segment(
+                item[2], item[3], shooter_x, shooter_y, PITCH_LENGTH, GOAL_CENTER_Y
+            )
+            <= SHOT_CORRIDOR_M
+        ),
+        "gk_distance_m": gk_distance,
+        "is_regular_play": 1,
+        "is_counter": 0,
+        "is_dead_ball": 0,
+        "is_penalty": 0,
+        "minute": int(timestamp // 60),
+        "second": int(timestamp % 60),
+        "players": players,
+        "source": "footpass_tactical",
+    }
+
+
 def _footpass_shot_features(
     frame_rows: Any,
     *,
@@ -580,43 +723,39 @@ def _footpass_shot_features(
     shooter_y: float,
     timestamp: float,
 ) -> dict[str, object]:
-    from .xg_data import PRESSURE_RADIUS_M
-
-    visible: list[tuple[int, int, float, float]] = []
-    for row in frame_rows:
-        raw_x, raw_y = float(row[5]), float(row[6])
-        if raw_x != raw_x or raw_y != raw_y:
-            continue
-        x, y = normalize_footpass_position(raw_x, raw_y, team)
-        visible.append((int(row[2]), int(row[4]), x, y))
-    opponents = [item for item in visible if item[0] != team]
-    allies = [item for item in visible if item[0] == team]
-    goalkeeper = next((item for item in opponents if item[1] == 1), None)
-    nearby_defenders = sum(
-        item[1] != 1
-        and ((item[2] - shooter_x) ** 2 + (item[3] - shooter_y) ** 2) ** 0.5
-        <= PRESSURE_RADIUS_M
-        for item in opponents
+    freeze = footpass_freeze_frame(
+        frame_rows,
+        attacking_direction=team,
+        shooter_x=shooter_x,
+        shooter_y=shooter_y,
+        timestamp=timestamp,
     )
-    point = (shooter_x, shooter_y)
-    return {
-        "x_shooter": shooter_x,
-        "y_shooter": shooter_y,
-        "shot_angle": shot_angle(point),
-        "distance_to_goal": shot_distance(point),
-        "x_goalkeeper": goalkeeper[2] if goalkeeper else None,
-        "y_goalkeeper": goalkeeper[3] if goalkeeper else None,
-        "foe_players": len(opponents),
-        "ally_players": max(0, len(allies) - 1),
-        "defending_players": nearby_defenders,
-        "under_pressure": int(nearby_defenders > 0),
-        "is_regular_play": 1,
-        "is_counter": 0,
-        "is_dead_ball": 0,
-        "is_penalty": 0,
-        "minute": int(timestamp // 60),
-        "second": int(timestamp % 60),
-    }
+    return {key: freeze[key] for key in _FOOTPASS_SHOT_XG_KEYS if key in freeze}
+
+
+def load_footpass_freeze_frame(
+    tactical_h5: Path,
+    *,
+    match_key: str,
+    frame: int,
+    attacking_direction: int,
+    shooter_x: float,
+    shooter_y: float,
+    timestamp: float,
+) -> dict[str, object]:
+    rows = _load_tactical_rows(tactical_h5, match_key)
+    frame_values = rows[:, 0].copy()
+    freeze = footpass_freeze_frame(
+        _frame_slice(rows, frame_values, frame),
+        attacking_direction=attacking_direction,
+        shooter_x=shooter_x,
+        shooter_y=shooter_y,
+        timestamp=timestamp,
+    )
+    freeze["match_key"] = match_key
+    freeze["frame"] = frame
+    freeze["evidence_id"] = f"footpass-hdf5:{match_key}:{frame}:freeze"
+    return freeze
 
 
 def load_footpass_events(

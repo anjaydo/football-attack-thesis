@@ -24,7 +24,7 @@ class DynamicCalibrationConfig:
     min_frame_coverage: float = 0.9
     min_inlier_ratio: float = 0.6
     max_interpolation_gap_frames: int = 25
-    max_projector_gap_frames: int = 8
+    max_projector_gap_frames: int = 25
 
     def validate(self) -> None:
         if self.source_width <= 0 or self.source_height <= 0:
@@ -103,6 +103,10 @@ class DynamicPitchProjector:
         self.max_interpolation_gap_frames = max_interpolation_gap_frames
         self.max_gap_frames = max_gap_frames
 
+    def _ineligible_record(self, frame_index: int) -> bool:
+        record = self._records.get(frame_index)
+        return record is not None and record.correspondences == 0
+
     def _nearest_frame(self, frame_index: int) -> int | None:
         if not self._frames:
             return None
@@ -135,7 +139,11 @@ class DynamicPitchProjector:
         if bounds is None:
             return "unsupported"
         left, right = bounds
-        return "interpolated" if left != right else "extrapolated"
+        if left != right:
+            return "interpolated"
+        if self._ineligible_record(frame_index):
+            return "unsupported"
+        return "extrapolated"
 
     def for_frame(self, frame_index: int) -> PitchProjector | None:
         bounds = self._bounding_frames(frame_index)
@@ -143,6 +151,8 @@ class DynamicPitchProjector:
             return None
         left, right = bounds
         if left == right:
+            if self._ineligible_record(frame_index):
+                return None
             return self._projectors[left]
         fraction = (frame_index - left) / (right - left)
         matrix = (
@@ -159,6 +169,8 @@ class DynamicPitchProjector:
             return None
         left, right = bounds
         if left == right:
+            if self._ineligible_record(frame_index):
+                return None
             return self._records[left].confidence
         fraction = (frame_index - left) / (right - left)
         return (

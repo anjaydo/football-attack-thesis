@@ -208,6 +208,27 @@ class DeterministicEvidenceClient(LLMClient):
         ]
         if bundle.attack.entered_penalty_box:
             features.append("entered penalty box")
+        spatial = bundle.spatial_context or {}
+        xg_raw = bundle.xg_raw or {}
+        gk_distance = spatial.get("gk_distance_m")
+        if gk_distance is not None:
+            features.append(f"GK {float(gk_distance):.1f} m from shooter")
+        if xg_raw.get("body_part"):
+            features.append(f"body_part {xg_raw['body_part']}")
+        if spatial.get("defenders_in_box") is not None:
+            features.append(f"{int(spatial['defenders_in_box'])} defenders in the box")
+        if spatial.get("foes_in_shot_corridor") is not None:
+            features.append(f"{int(spatial['foes_in_shot_corridor'])} foes on the shot line")
+        if xg_raw.get("play_pattern"):
+            features.append(f"play_pattern {xg_raw['play_pattern']}")
+        buildup = dict(spatial.get("possession_buildup") or {})
+        if buildup.get("assist_type"):
+            assist = dict(buildup.get("assist") or {})
+            features.append(
+                f"last {buildup['assist_type']} {float(assist.get('dt_sec') or 0):.1f}s before terminal"
+            )
+        if buildup.get("cross_then_header"):
+            features.append("cross then headed attempt")
         comparison = None
         if bundle.benchmarks:
             first = bundle.benchmarks[0]
@@ -216,6 +237,17 @@ class DeterministicEvidenceClient(LLMClient):
                 f"(n={first.sample_size}, {first.season})"
             )
         xg_text = "unknown" if xg is None else f"{xg:.3f} (research_only)"
+        spatial_bits = []
+        if gk_distance is not None:
+            spatial_bits.append(f"thủ môn cách {float(gk_distance):.1f} m")
+        if spatial.get("defenders_in_box") is not None:
+            spatial_bits.append(f"{int(spatial['defenders_in_box'])} đối phương trong vòng cấm")
+        if buildup.get("assist_type"):
+            assist = dict(buildup.get("assist") or {})
+            spatial_bits.append(
+                f"{buildup['assist_type']} {float(assist.get('dt_sec') or 0):.1f}s trước dứt điểm"
+            )
+        spatial_clause = f" Freeze-frame: {', '.join(spatial_bits)}." if spatial_bits else ""
         claims = (
             EvidenceClaim(
                 text=f"Chance quality {chance}; xG-v2 {xg_text}.",
@@ -228,7 +260,7 @@ class DeterministicEvidenceClient(LLMClient):
             xg_probability=xg,
             tactical_read=(
                 f"Chuỗi {bundle.attack.duration_sec:.1f}s tiến {bundle.attack.progression_m:.1f} m "
-                f"với {bundle.attack.shots} dứt điểm. "
+                f"với {bundle.attack.shots} dứt điểm.{spatial_clause} "
                 "Đây không phải nhãn hiệu quả đã xác thực."
             ),
             structural_features=tuple(features),

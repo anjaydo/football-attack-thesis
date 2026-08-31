@@ -43,6 +43,7 @@ BROWSER_CODECS = _browser_video.BROWSER_CODECS
 sample_preview_frames = _browser_video.sample_preview_frames
 video_codec = _browser_video.video_codec
 plot_pitch_events = _pitch_visualization.plot_pitch_events
+plot_freeze_frame = _pitch_visualization.plot_freeze_frame
 build_footpass_dynamic_projector = _dynamic_calibration.build_footpass_dynamic_projector
 from attack_analysis.event_calibration import load_event_thresholds
 from attack_analysis.attack_v2 import FootpassAttackV2Config, decode_footpass_attack_v2
@@ -627,12 +628,20 @@ def render_calibrated_window(
                 )
                 if int(report.get("valid_sampled_frames") or 0) == 0:
                     st.warning(
-                        "Calibration FAIL trên cửa sổ này — vẫn chạy YOLO để tracking/skeleton; "
-                        "tọa độ sân có thể thiếu."
+                        "Oracle homography FAIL trên cửa sổ này — không có nghĩa cả pipeline hỏng. "
+                        "Event FOOTPASS vẫn đúng; freeze-frame tactical HDF5 (nếu có) vẫn dùng cho xG. "
+                        "YOLO vẫn chạy (bbox/skeleton). Tọa độ sân YOLO sẽ lấy grass-polygon "
+                        "video-only nếu detect được đường biên cỏ — đây là baseline nghiên cứu, không phải oracle."
                     )
                     yolo_projector = None
                 else:
                     yolo_projector = frame_projector
+                video_clock = resolver.video_clock(match_key, preview_fps=metadata.fps)
+                sync_mtime = (
+                    resolver.sync_path.stat().st_mtime
+                    if resolver.sync_path is not None and resolver.sync_path.is_file()
+                    else None
+                )
                 with st.spinner(
                     "Đang chạy YOLO trên Full HD, chiếu track lên mặt sân và áp dụng event quality gates..."
                 ):
@@ -647,9 +656,11 @@ def render_calibrated_window(
                         dataset_paths=(playbyplay_path, tactical_path),
                         cache_context={
                             "calibration": "footpass_dynamic_roi_homography_v3_temporal",
-                            "overlay": "fullhd_pose_gk_v2",
+                            "overlay": "fullhd_pose_gk_v4_video_only",
                             "match_key": match_key,
                             "tactical_mtime": tactical_path.stat().st_mtime,
+                            "video_sync_mtime": sync_mtime,
+                            "preview_offset_sec": video_clock.get("preview_offset_sec"),
                             "xg_model_mtime": (
                                 DEFAULT_XG_MODEL.stat().st_mtime
                                 if DEFAULT_XG_MODEL.is_file()
@@ -726,6 +737,13 @@ def render_calibrated_window(
     unsupported_frames = int(calibration.get("unsupported_frames", 0))
     ineligible_frames = int(calibration.get("ineligible_frames", 0))
     eligible_frames = int(calibration.get("eligible_frames") or 0)
+    video_clock = dict(manifest.get("video_clock") or {})
+    if video_clock:
+        st.caption(
+            f"Đồng hồ video: `{video_clock.get('role')}` · preview {video_clock.get('preview_fps')} fps · "
+            f"trận {video_clock.get('match_fps')} fps · offset {video_clock.get('preview_offset_sec')} s. "
+            "Sai offset/fps làm cửa sổ HDF5 trống (coverage 0%) dù event FOOTPASS đúng."
+        )
     if any((direct_coverage, interpolated_coverage, extrapolated_coverage, ineligible_frames)):
         st.caption(
             f"Nguồn calibration: {direct_coverage:.1f}% fit trực tiếp qua holdout gate · "
@@ -768,14 +786,25 @@ def render_calibrated_window(
     st.markdown("#### Overlay YOLO trên cửa sổ đã chọn")
     st.caption(
         "Attack-v2 đã được decode ở trên. Overlay này chiếu track YOLO bằng homography FOOTPASS "
-        "và không đổi hợp đồng v2, không gắn xG, không đưa effectiveness verdict."
+        "(hoặc grass-polygon video-only khi oracle FAIL) và không đổi hợp đồng v2, không gắn xG, "
+        "không đưa effectiveness verdict."
     )
     if skip_reason == "dynamic_calibration_quality_gate_failed":
-        st.error("Không có homography hợp lệ trong cửa sổ nên overlay YOLO bị bỏ qua.")
+        st.warning(
+            "Oracle calibration quality gate FAIL — overlay YOLO vẫn được xuất. "
+            "Không suy event từ video. xG dùng FOOTPASS (+ freeze HDF5 nếu có). "
+            "Tọa độ sân YOLO có thể là video-only grass polygon (baseline nghiên cứu)."
+        )
+    elif skip_reason == "calibration_required_for_event_inference":
+        st.info(
+            "Không có homography oracle trên cửa sổ này. YOLO overlay vẫn chạy; "
+            "nếu thấy polygon cỏ, fusion có thể dùng video-only baseline."
+        )
     elif not calibration_passed:
         st.info(
             "Quality gate coverage trên frame đủ điều kiện chưa đạt 90%. "
-            "YOLO vẫn chạy trên các frame đã chiếu được; replay/thiếu bbox không tính vào gate."
+            "YOLO vẫn chạy trên các frame đã chiếu được; replay/thiếu bbox không tính vào gate. "
+            "Event FOOTPASS không bị ảnh hưởng."
         )
     gate_columns = st.columns(4)
     gate_columns[0].metric("Assisted calibration", "PASS" if calibration_passed else "FAIL")
@@ -909,18 +938,140 @@ def render_conclusion_v2(
     st.markdown("#### 2. Spatial context")
     fusion = evidence.fusion
     if fusion is None:
-        st.caption("Chưa có YOLO overlay cho sequence này. Chạy cửa sổ calibrated để fusion.")
+        st.caption("Chưa có YOLO overlay hay freeze-frame FOOTPASS cho sequence này.")
     else:
         assoc = fusion.association
-        cols = st.columns(4)
+        xg_raw = dict(assoc.xg_raw or {})
+        spatial = dict(assoc.spatial_context or {})
+        provenance = dict(spatial.get("provenance") or {})
+        cols = st.columns(5)
+        gk_distance = spatial.get("gk_distance_m")
         cols[0].metric("Association", assoc.method)
         cols[1].metric("Track", assoc.track_id or "—")
         cols[2].metric(
-            "Distance",
-            "—" if assoc.distance_m is None else f"{assoc.distance_m:.2f} m",
+            "GK distance",
+            "—" if gk_distance is None else f"{float(gk_distance):.1f} m",
         )
-        cols[3].metric("Foes", assoc.xg_raw.get("foe_players") if assoc.xg_raw else "—")
-        st.json(assoc.xg_raw, expanded=False)
+        cols[3].metric("Foes", xg_raw.get("foe_players") if xg_raw.get("foe_players") is not None else "—")
+        cols[4].metric("Body part", str(xg_raw.get("body_part") or "—"))
+        buildup = dict(spatial.get("possession_buildup") or {})
+        assist = dict(buildup.get("assist") or {})
+        if assist:
+            st.caption(
+                f"Build-up: `{assist.get('action_type')}` "
+                f"{float(assist['dt_sec']):.1f}s trước terminal"
+                + (" · cross → header" if buildup.get("cross_then_header") else "")
+            )
+        rows = []
+        display_keys = (
+            ("x_shooter", "Shooter x"),
+            ("y_shooter", "Shooter y"),
+            ("body_part", "Body part"),
+            ("x_goalkeeper", "GK x"),
+            ("y_goalkeeper", "GK y"),
+            ("goalkeeper_visible", "GK (oracle)"),
+            ("foe_players", "Foe players"),
+            ("ally_players", "Allies (ex. shooter)"),
+            ("defending_players", "Defenders ≤2 m"),
+            ("under_pressure", "Under pressure"),
+            ("play_pattern", "Play pattern"),
+            ("shot_type", "Shot type"),
+            ("shot_angle", "Shot angle (rad)"),
+            ("distance_to_goal", "Distance to goal (m)"),
+        )
+        for key, label in display_keys:
+            value = xg_raw.get(key)
+            if key in {"defenders_in_box", "allies_ahead", "foes_in_shot_corridor", "gk_distance_m"}:
+                value = spatial.get(key, value)
+            rows.append(
+                {
+                    "Field": label,
+                    "Value": value if value is not None else "—",
+                    "Source": provenance.get(key, "—"),
+                }
+            )
+        for key, label in (
+            ("defenders_in_box", "Defenders in box"),
+            ("allies_ahead", "Allies ahead of ball"),
+            ("foes_in_shot_corridor", "Foes on shot line"),
+            ("goalkeeper_in_camera", "GK in camera (YOLO)"),
+            ("yolo_player_count", "YOLO players with pitch xy"),
+            ("ball_detected", "Ball in YOLO frame"),
+            ("shooter_keypoint_count", "Shooter keypoints"),
+            ("calibration_confidence", "Frame calibration"),
+        ):
+            value = spatial.get(key)
+            rows.append(
+                {
+                    "Field": label,
+                    "Value": value if value is not None else "—",
+                    "Source": provenance.get(
+                        key,
+                        "yolo"
+                        if key.startswith("yolo")
+                        or key in {"ball_detected", "goalkeeper_in_camera", "shooter_keypoint_count", "calibration_confidence"}
+                        else "—",
+                    ),
+                }
+            )
+        if buildup.get("assist_type"):
+            rows.append(
+                {
+                    "Field": "Last assist",
+                    "Value": f"{buildup['assist_type']} ({assist.get('dt_sec')}s)",
+                    "Source": "event_sequence",
+                }
+            )
+        if spatial.get("play_pattern_reason"):
+            rows.append(
+                {
+                    "Field": "Play pattern note",
+                    "Value": spatial.get("play_pattern_reason"),
+                    "Source": provenance.get("play_pattern", spatial.get("play_pattern_source") or "event_sequence"),
+                }
+            )
+        align = spatial.get("yolo_role_align") if isinstance(spatial.get("yolo_role_align"), dict) else {}
+        if align:
+            rows.append(
+                {
+                    "Field": "YOLO↔FOOTPASS role match",
+                    "Value": f"{align.get('n_matched')} tracks · agreement {align.get('agreement')}",
+                    "Source": provenance.get("yolo_role_align", "yolo+footpass_tactical"),
+                }
+            )
+        if spatial.get("ball_quality_warning"):
+            rows.append(
+                {
+                    "Field": "Ball quality",
+                    "Value": spatial["ball_quality_warning"],
+                    "Source": "yolo",
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        if spatial.get("ball_quality_warning"):
+            st.caption(
+                f"{spatial['ball_quality_warning']} — xG vẫn được tính từ vị trí sút "
+                "(missingness masks cho GK/counts), không withhold cả model."
+            )
+        if spatial.get("ontology_note"):
+            st.caption(str(spatial["ontology_note"]))
+        players = list(spatial.get("players") or ())
+        if players or buildup.get("events"):
+            freeze_figure = plot_freeze_frame(
+                players,
+                x_shooter=xg_raw.get("x_shooter"),
+                y_shooter=xg_raw.get("y_shooter"),
+                x_goalkeeper=xg_raw.get("x_goalkeeper"),
+                y_goalkeeper=xg_raw.get("y_goalkeeper"),
+                events=tuple(buildup.get("events") or ()),
+                yolo_shooter=spatial.get("yolo_shooter") if isinstance(spatial.get("yolo_shooter"), dict) else None,
+                shooter_keypoints=tuple(spatial.get("shooter_keypoints") or ()),
+                shooter_bbox=spatial.get("shooter_bbox") if isinstance(spatial.get("shooter_bbox"), dict) else None,
+            )
+            st.pyplot(freeze_figure, width="stretch")
+            plt.close(freeze_figure)
+        with st.expander("xg_raw JSON"):
+            st.json(xg_raw, expanded=False)
 
     st.markdown("#### 3. So sánh benchmark")
     if evidence.benchmarks:
@@ -1418,6 +1569,7 @@ with analysis_tab:
                         allow_research_only=True,
                         benchmarks=role_benchmarks,
                         web_context=web_results,
+                        tactical_h5=tactical if tactical.exists() else None,
                     )
                     overview = attack_v2_research_overview(
                         attack_v2,

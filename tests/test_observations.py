@@ -71,6 +71,25 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(frame.objects[0].keypoints[0][2], 0.8)
         self.assertEqual(frame.objects[1].track_id, "1")
 
+    def test_parses_homography_projected_keypoints(self) -> None:
+        frame = FrameObservation.from_dict(
+            {
+                "frame_index": 0,
+                "timestamp_sec": 0.0,
+                "objects": [
+                    {
+                        "track_id": "1",
+                        "object_type": "player",
+                        "confidence": 0.9,
+                        "bbox": {"x1": 10, "y1": 20, "x2": 30, "y2": 60},
+                        "keypoints": [[20, 30, 0.8, 90.1, 34.2]],
+                    }
+                ],
+            }
+        )
+        self.assertEqual(len(frame.objects[0].keypoints[0]), 5)
+        self.assertAlmostEqual(frame.objects[0].keypoints[0][3], 90.1)
+
     def test_allows_missing_track_id(self) -> None:
         frame = FrameObservation.from_dict(
             {

@@ -81,9 +81,11 @@ class TrackedObject:
         if self.anchor_image is not None and len(self.anchor_image) != 2:
             raise ValueError("anchor_image must contain x and y")
         for keypoint in self.keypoints:
-            if len(keypoint) not in {2, 3}:
-                raise ValueError("each keypoint must contain x,y or x,y,confidence")
-            if len(keypoint) == 3 and not 0.0 <= keypoint[2] <= 1.0:
+            if len(keypoint) not in {2, 3, 5}:
+                raise ValueError(
+                    "each keypoint must contain x,y[,confidence[,pitch_x,pitch_y]]"
+                )
+            if len(keypoint) >= 3 and not 0.0 <= keypoint[2] <= 1.0:
                 raise ValueError("keypoint confidence must be between 0 and 1")
         if self.speed is not None and self.speed < 0:
             raise ValueError("speed cannot be negative")

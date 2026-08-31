@@ -146,6 +146,8 @@ class EvidenceBundle:
     benchmarks: tuple[BenchmarkRecord, ...] = ()
     source_ids: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
+    spatial_context: dict[str, Any] | None = None
+    xg_raw: dict[str, Any] | None = None
 
     @property
     def downstream_ready(self) -> bool:
@@ -158,10 +160,14 @@ class EvidenceBundle:
         ids = set(self.attack.evidence_ids)
         ids.update(record.benchmark_id for record in self.benchmarks)
         ids.update(self.source_ids)
+        if self.spatial_context:
+            freeze_id = self.spatial_context.get("footpass_evidence_id")
+            if freeze_id:
+                ids.add(str(freeze_id))
         return frozenset(ids)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "attack": self.attack.to_dict(),
             "quality_gates": dict(self.quality_gates),
             "quality_metrics": dict(self.quality_metrics),
@@ -170,6 +176,11 @@ class EvidenceBundle:
             "limitations": list(self.limitations),
             "downstream_ready": self.downstream_ready,
         }
+        if self.spatial_context:
+            payload["spatial_context"] = dict(self.spatial_context)
+        if self.xg_raw:
+            payload["xg_raw"] = dict(self.xg_raw)
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EvidenceBundle":
@@ -180,6 +191,10 @@ class EvidenceBundle:
             benchmarks=tuple(BenchmarkRecord.from_dict(item) for item in data.get("benchmarks", ())),
             source_ids=tuple(str(item) for item in data.get("source_ids", ())),
             limitations=tuple(str(item) for item in data.get("limitations", ())),
+            spatial_context=(
+                dict(data["spatial_context"]) if data.get("spatial_context") else None
+            ),
+            xg_raw=dict(data["xg_raw"]) if data.get("xg_raw") else None,
         )
 
 

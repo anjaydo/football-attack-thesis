@@ -6,7 +6,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .geometry import Point, Projector, projector_confidence, projector_for_frame
+from .geometry import (
+    VIDEO_ONLY_CALIBRATION_CONFIDENCE,
+    Point,
+    Projector,
+    projector_confidence,
+    projector_for_frame,
+    projector_from_pitch_polygon,
+)
 from .field_geometry import FieldGeometryDetector, FieldLineConfig, draw_field_geometry
 from .models import PITCH_LENGTH, PITCH_WIDTH
 from .motion import SpeedEstimator
@@ -165,7 +172,7 @@ def _match_keypoints(
     pose_boxes: Any,
     pose_keypoints: Any,
     used_pose_indexes: set[int],
-    minimum_iou: float = 0.12,
+    minimum_iou: float = 0.05,
 ) -> Any | None:
     if pose_keypoints is None:
         return None
@@ -245,6 +252,25 @@ def _speed_label(speed_per_sec: float, calibrated: bool) -> str:
     if calibrated:
         return f"{speed_per_sec * 3.6:.1f} km/h"
     return f"{speed_per_sec:.1f} px/s"
+
+
+def _keypoints_payload(
+    keypoints: Any,
+    projector: Any | None,
+    threshold: float,
+) -> list[list[float]]:
+    payload: list[list[float]] = []
+    for keypoint in keypoints:
+        x = float(keypoint[0])
+        y = float(keypoint[1])
+        confidence = float(keypoint[2]) if len(keypoint) > 2 else 1.0
+        row = [x, y, confidence]
+        if projector is not None and confidence >= threshold:
+            pitch = _project_on_pitch(projector, (x, y))
+            if pitch is not None:
+                row.extend([round(pitch[0], 3), round(pitch[1], 3)])
+        payload.append(row)
+    return payload
 
 
 def _project_on_pitch(projector: Any | None, point: Point) -> Point | None:
@@ -369,18 +395,7 @@ def annotate_video(
             timestamp_sec = frame_index / fps
             frame_projector = projector_for_frame(projector, frame_index)
             calibration_confidence = projector_confidence(projector, frame_index)
-            if frame_projector is not None:
-                calibrated_frames += 1
-                cv2.putText(
-                    frame,
-                    f"CALIBRATED pitch | confidence {calibration_confidence or 0.0:.2f}",
-                    (10, 18),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.42,
-                    (40, 230, 100),
-                    1,
-                    cv2.LINE_AA,
-                )
+            projector_source = "oracle" if frame_projector is not None else None
             scene_cut = scene_detector.update(frame) if scene_detector else False
             if scene_cut:
                 scene_cuts_detected += 1
@@ -392,6 +407,34 @@ def annotate_video(
             if field_geometry is not None:
                 field_geometry_frames += 1
                 draw_field_geometry(cv2, frame, field_geometry)
+                if frame_projector is None:
+                    fallback = projector_from_pitch_polygon(field_geometry.pitch_polygon)
+                    if fallback is not None:
+                        frame_projector = fallback
+                        calibration_confidence = VIDEO_ONLY_CALIBRATION_CONFIDENCE
+                        projector_source = "video_only_polygon"
+            if frame_projector is not None:
+                calibrated_frames += 1
+                if projector_source == "video_only_polygon":
+                    overlay_label = (
+                        f"VIDEO-ONLY pitch (grass polygon) | baseline {calibration_confidence:.2f}"
+                    )
+                    overlay_color = (40, 200, 255)
+                else:
+                    overlay_label = (
+                        f"CALIBRATED pitch | confidence {calibration_confidence or 0.0:.2f}"
+                    )
+                    overlay_color = (40, 230, 100)
+                cv2.putText(
+                    frame,
+                    overlay_label,
+                    (10, 18),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42,
+                    overlay_color,
+                    1,
+                    cv2.LINE_AA,
+                )
             automatic_roi = (
                 PolygonROI(field_geometry.pitch_polygon)
                 if field_geometry is not None and len(field_geometry.pitch_polygon) >= 3
@@ -529,9 +572,11 @@ def annotate_video(
                 if team is not None:
                     player_data["team"] = team
                 if keypoints is not None:
-                    player_data["keypoints"] = [
-                        [float(value) for value in keypoint] for keypoint in keypoints
-                    ]
+                    player_data["keypoints"] = _keypoints_payload(
+                        keypoints,
+                        frame_projector,
+                        settings.keypoint_confidence,
+                    )
                 if pitch_position is not None:
                     player_data["pitch_x"] = round(pitch_position[0], 3)
                     player_data["pitch_y"] = round(pitch_position[1], 3)

@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .attack_features import build_attack_features
-from .fusion import FusionAssociation, FusedXGResult, score_attack_with_observations
+from .footpass import load_footpass_freeze_frame
+from .fusion import FusedXGResult, score_attack_with_observations
 from .models import AttackSequence, AttackSequenceV2, Event, TerminalType
 from .observations import FrameObservation
 from .quality import read_observations_jsonl
@@ -44,6 +45,9 @@ class AttackEvidenceBundle:
             ids.add(f"xg:{self.xg_record.record_id}")
         if self.fusion is not None:
             ids.add(self.fusion.association.association_id)
+            freeze_id = self.fusion.association.spatial_context.get("footpass_evidence_id")
+            if freeze_id:
+                ids.add(str(freeze_id))
         ids.update(record.benchmark_id for record in self.benchmarks)
         for index, snippet in enumerate(self.web_context):
             ids.add(str(snippet.get("snippet_id") or f"web:{index}"))
@@ -82,6 +86,15 @@ class AttackEvidenceBundle:
             xg_max=xg_value,
             evidence_ids=tuple(features.evidence_ids) + extra_ids,
         )
+        spatial = None
+        xg_raw = None
+        if self.fusion is not None:
+            spatial = dict(self.fusion.association.spatial_context)
+            xg_raw = dict(self.fusion.association.xg_raw)
+            freeze_id = spatial.get("footpass_evidence_id")
+            if freeze_id:
+                extra_ids = tuple(dict.fromkeys((*features.evidence_ids, str(freeze_id))))
+                features = replace(features, evidence_ids=extra_ids)
         return EvidenceBundle(
             attack=features,
             quality_gates={**self.quality_gates, "xg_scored": self.xg_record is not None},
@@ -89,6 +102,8 @@ class AttackEvidenceBundle:
             benchmarks=self.benchmarks,
             source_ids=(self.attack.attack_id,),
             limitations=self.limitations,
+            spatial_context=spatial,
+            xg_raw=xg_raw,
         )
 
 
@@ -186,6 +201,42 @@ def frame_for_terminal(
     return min(frames, key=lambda item: abs(item.frame_index - target))
 
 
+def _attacking_direction(action) -> int | None:
+    if action.raw_left_to_right is True:
+        return 0
+    if action.raw_left_to_right is False:
+        return 1
+    return None
+
+
+def _load_terminal_freeze(
+    attack_v2: AttackSequenceV2,
+    tactical_h5: Path | None,
+) -> dict[str, object] | None:
+    if tactical_h5 is None or not Path(tactical_h5).is_file():
+        return None
+    terminal = next(
+        (item for item in attack_v2.possession.actions if item.action_id == attack_v2.terminal.action_id),
+        attack_v2.possession.actions[-1],
+    )
+    direction = _attacking_direction(terminal)
+    if direction is None or terminal.x is None or terminal.y is None:
+        return None
+    match_key = f"{attack_v2.match_id}_H{attack_v2.period}"
+    try:
+        return load_footpass_freeze_frame(
+            Path(tactical_h5),
+            match_key=match_key,
+            frame=terminal.frame,
+            attacking_direction=direction,
+            shooter_x=float(terminal.x),
+            shooter_y=float(terminal.y),
+            timestamp=terminal.timestamp_sec,
+        )
+    except (KeyError, OSError, RuntimeError, ValueError):
+        return None
+
+
 def _ball_f1_from_manifest(window_manifest: Mapping[str, Any] | None) -> float | None:
     if not window_manifest:
         return None
@@ -207,6 +258,7 @@ def build_attack_evidence(
     web_context: tuple[dict[str, object], ...] = (),
     model: TrainedXGModelV2 | None = None,
     frames: tuple[FrameObservation, ...] | None = None,
+    tactical_h5: Path | None = None,
 ) -> AttackEvidenceBundle:
     limitations: list[str] = [
         "xG-v2 is research_only until FOOTPASS human-domain validation.",
@@ -246,13 +298,19 @@ def build_attack_evidence(
         )
     quality_gates["xg_model"] = loaded_model is not None
     mapping = dict(team_mapping) if team_mapping else default_team_mapping(attack_v2)
+    freeze = _load_terminal_freeze(attack_v2, tactical_h5)
+    quality_gates["footpass_freeze"] = freeze is not None
+    if freeze:
+        freeze_id = str(freeze.get("evidence_id") or "")
+        if freeze_id:
+            limitations.append(f"FOOTPASS freeze-frame `{freeze_id}` supplies GK/foe/packing.")
     if loaded_frames:
         frame = frame_for_terminal(
             loaded_frames,
             terminal.frame,
             window_manifest=window_manifest,
         )
-        if frame is None:
+        if frame is None and freeze is None:
             withheld = "terminal_frame_missing"
             limitations.append("YOLO observations exist but the terminal frame was not found.")
         else:
@@ -262,17 +320,39 @@ def build_attack_evidence(
                 model=loaded_model,
                 team_mapping=mapping,
                 ball_f1=_ball_f1_from_manifest(window_manifest),
+                footpass_freeze=freeze,
             )
             xg_record = fusion.xg_record
             withheld = fusion.withheld_reason
+    elif freeze is not None:
+        fusion = score_attack_with_observations(
+            attack_v2,
+            None,
+            model=loaded_model,
+            team_mapping=mapping,
+            footpass_freeze=freeze,
+        )
+        xg_record = fusion.xg_record
+        withheld = fusion.withheld_reason
+        limitations.append("YOLO window missing; spatial counts use FOOTPASS tactical freeze-frame.")
     elif not quality_gates["shot_terminal"]:
         withheld = "terminal_not_shot"
         limitations.append("xG-v2 scores only shot_attempt / headed_attempt terminals.")
     else:
-        withheld = withheld or "no_yolo_observations"
-        limitations.append("Run the YOLO window on this sequence before scoring fused xG.")
+        fusion = score_attack_with_observations(
+            attack_v2,
+            None,
+            model=loaded_model,
+            team_mapping=mapping,
+            footpass_freeze=None,
+        )
+        xg_record = fusion.xg_record
+        withheld = fusion.withheld_reason
+        limitations.append(
+            "No YOLO window or HDF5 freeze; xG uses shooter location and sequence "
+            "pattern only (GK/counts missing, xG-v2 missingness masks)."
+        )
         if loaded_model is None:
-            withheld = "no_xg_v2_model"
             limitations.append("models/xg-v2.joblib was not found.")
     if withheld and xg_record is None:
         limitations.append(f"xG withheld: {withheld}.")
@@ -282,7 +362,10 @@ def build_attack_evidence(
     quality_gates["calibration"] = bool(quality_metrics.get("calibrated_position_coverage", 0) > 0) or bool(
         loaded_frames
     )
-    if not loaded_frames:
+    if freeze:
+        quality_gates["tracking"] = True
+        quality_gates["calibration"] = True
+    elif not loaded_frames:
         quality_gates["tracking"] = False
         quality_gates["calibration"] = False
     return AttackEvidenceBundle(
