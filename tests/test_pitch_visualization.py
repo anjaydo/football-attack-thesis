@@ -109,6 +109,71 @@ class PitchVisualizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no pitch coordinates"):
             plot_attack_pitch(sequence)
 
+    def test_interactive_pitch_puts_event_details_in_hover(self) -> None:
+        from attack_analysis.pitch_visualization import interactive_pitch_events
+
+        sequence = AttackSequence(
+            attack_id="game_1_H1:attack-0001",
+            team="1",
+            start_sec=1.0,
+            end_sec=3.0,
+            events=(
+                Event(1.0, "pass", "1", x=35.0, y=45.0, jersey=8, frame=25, outcome="complete"),
+                Event(2.0, "drive", "1", x=68.0, y=34.0, jersey=10, player_id="p10"),
+                Event(3.0, "shot", "1", x=91.0, y=30.0, jersey=9, xg=0.24, xg_source="trained_xg:v1"),
+            ),
+        )
+        chart = interactive_pitch_events(sequence.events)
+        spec = chart.to_dict()
+        mark_types = []
+        tooltips = []
+        for layer in spec.get("layer", []):
+            mark = layer.get("mark")
+            mark_types.append(mark.get("type") if isinstance(mark, dict) else mark)
+            tooltip = (layer.get("encoding") or {}).get("tooltip") or []
+            if isinstance(tooltip, dict):
+                tooltips.append(tooltip)
+            else:
+                tooltips.extend(tooltip)
+        self.assertIn("rect", mark_types)
+        self.assertIn("line", mark_types)
+        self.assertIn("point", mark_types)
+        self.assertIn("text", mark_types)
+        self.assertNotIn("image", mark_types)
+        width = float(spec.get("width") or spec.get("config", {}).get("view", {}).get("continuousWidth") or 0)
+        height = float(spec.get("height") or spec.get("config", {}).get("view", {}).get("continuousHeight") or 0)
+        self.assertGreater(width, 0)
+        self.assertGreater(height, 0)
+        self.assertAlmostEqual(width / height, (105.0 + 4.0) / (68.0 + 4.0), places=2)
+        y_encoding = next(
+            (layer.get("encoding") or {}).get("y")
+            for layer in spec.get("layer", [])
+            if (layer.get("encoding") or {}).get("y")
+        )
+        self.assertTrue(y_encoding.get("scale", {}).get("reverse"))
+        self.assertTrue(any(item.get("title") in {"Hành động", "Chi tiết"} for item in tooltips if isinstance(item, dict)))
+        event_values = []
+        for dataset in (spec.get("datasets") or {}).values():
+            if isinstance(dataset, list):
+                event_values.extend(dataset)
+        for layer in spec.get("layer", []):
+            values = ((layer.get("data") or {}).get("values")) or []
+            if isinstance(values, list):
+                event_values.extend(values)
+        titles = [row.get("title") for row in event_values if isinstance(row, dict) and row.get("title")]
+        details = " ".join(str(row.get("detail") or "") for row in event_values if isinstance(row, dict))
+        event_coords = {
+            (round(float(row["x"]), 1), round(float(row["y"]), 1))
+            for row in event_values
+            if isinstance(row, dict) and "action_label" in row
+        }
+        self.assertEqual(event_coords, {(35.0, 45.0), (68.0, 34.0), (91.0, 30.0)})
+        self.assertIn("1. Chuyền", titles)
+        self.assertIn("3. Sút", titles)
+        self.assertIn("frame 25", details)
+        self.assertIn("#8", details)
+        self.assertIn("xG 0.240", details)
+
     def test_freeze_frame_draws_event_trail_and_pose_inset(self) -> None:
         from attack_analysis.pitch_visualization import plot_freeze_frame
 

@@ -46,6 +46,20 @@ ACTION_COLORS = {
     "turnover": "#f59e0b",
 }
 
+SHOT_ACTION_TYPES = frozenset({"shot", "shot_attempt", "header", "headed_attempt"})
+
+# FIFA markings on a 105 × 68 m pitch (same geometry mplsoccer uses for custom).
+PENALTY_AREA_DEPTH_M = 16.5
+PENALTY_AREA_WIDTH_M = 40.32
+GOAL_AREA_DEPTH_M = 5.5
+GOAL_AREA_WIDTH_M = 18.32
+GOAL_WIDTH_M = 7.32
+CENTER_CIRCLE_RADIUS_M = 9.15
+PENALTY_SPOT_M = 11.0
+CORNER_ARC_RADIUS_M = 1.0
+PITCH_PAD_M = 2.0
+PIXELS_PER_METRE = 8.0
+
 ACTION_LABELS = {
     "possession_start": "Bắt đầu kiểm soát",
     "drive": "Dẫn bóng",
@@ -344,7 +358,7 @@ def plot_pitch_events(
     _draw_sequence_arrows(pitch, ax, views)
     for index, view in enumerate(views, start=1):
         color = ACTION_COLORS.get(view.action_type, "#e2e8f0")
-        marker = "*" if view.action_type in {"shot", "shot_attempt", "header", "headed_attempt"} else "o"
+        marker = "*" if view.action_type in SHOT_ACTION_TYPES else "o"
         size = 430 if marker == "*" else 285
         pitch.scatter(
             view.x,
@@ -399,7 +413,7 @@ def plot_pitch_events(
             Line2D(
                 [0],
                 [0],
-                marker="*" if action in {"shot", "shot_attempt", "header", "headed_attempt"} else "o",
+                marker="*" if action in SHOT_ACTION_TYPES else "o",
                 color="none",
                 markerfacecolor=ACTION_COLORS.get(action, "#e2e8f0"),
                 markeredgecolor="#ffffff",
@@ -429,6 +443,354 @@ def plot_pitch_events(
     )
     figure.subplots_adjust(left=0.02, right=0.98, top=0.94, bottom=0.12)
     return figure
+
+
+def _line_segment(x1: float, y1: float, x2: float, y2: float, group: str) -> list[dict[str, float | str | int]]:
+    return [
+        {"x": x1, "y": y1, "t": 0, "group": group},
+        {"x": x2, "y": y2, "t": 1, "group": group},
+    ]
+
+
+def _arc_points(
+    cx: float,
+    cy: float,
+    radius: float,
+    start_rad: float,
+    end_rad: float,
+    group: str,
+    *,
+    steps: int = 48,
+) -> list[dict[str, float | str | int]]:
+    rows: list[dict[str, float | str | int]] = []
+    for index in range(steps + 1):
+        angle = start_rad + (end_rad - start_rad) * index / steps
+        rows.append(
+            {
+                "x": cx + radius * math.cos(angle),
+                "y": cy + radius * math.sin(angle),
+                "t": index,
+                "group": group,
+            }
+        )
+    return rows
+
+
+def _penalty_box_lines(depth: float, width: float, left: bool) -> list[dict[str, float | str | int]]:
+    y0 = (PITCH_WIDTH - width) / 2.0
+    y1 = y0 + width
+    if left:
+        x0, x1 = 0.0, depth
+        tag = f"left-{depth}"
+    else:
+        x0, x1 = PITCH_LENGTH - depth, PITCH_LENGTH
+        tag = f"right-{depth}"
+    return [
+        *_line_segment(x1, y0, x1, y1, f"{tag}-front"),
+        *_line_segment(x0, y0, x1, y0, f"{tag}-bottom"),
+        *_line_segment(x0, y1, x1, y1, f"{tag}-top"),
+    ]
+
+
+def _metric_pitch_geometry() -> dict[str, list[dict[str, float | str | int]]]:
+    """Pitch outlines in metres so events and markings share one coordinate system."""
+
+    length, width = PITCH_LENGTH, PITCH_WIDTH
+    mid_x, mid_y = length / 2.0, width / 2.0
+    stripes: list[dict[str, float | str | int]] = []
+    stripe_count = 14
+    stripe_width = length / stripe_count
+    for index in range(0, stripe_count, 2):
+        stripes.append(
+            {
+                "x": index * stripe_width,
+                "x2": (index + 1) * stripe_width,
+                "y": 0.0,
+                "y2": width,
+            }
+        )
+    lines = [
+        *_line_segment(0.0, 0.0, length, 0.0, "sideline-bottom"),
+        *_line_segment(length, 0.0, length, width, "goal-line-right"),
+        *_line_segment(length, width, 0.0, width, "sideline-top"),
+        *_line_segment(0.0, width, 0.0, 0.0, "goal-line-left"),
+        *_line_segment(mid_x, 0.0, mid_x, width, "halfway"),
+        *_penalty_box_lines(PENALTY_AREA_DEPTH_M, PENALTY_AREA_WIDTH_M, True),
+        *_penalty_box_lines(PENALTY_AREA_DEPTH_M, PENALTY_AREA_WIDTH_M, False),
+        *_penalty_box_lines(GOAL_AREA_DEPTH_M, GOAL_AREA_WIDTH_M, True),
+        *_penalty_box_lines(GOAL_AREA_DEPTH_M, GOAL_AREA_WIDTH_M, False),
+    ]
+    goal_y0 = (width - GOAL_WIDTH_M) / 2.0
+    goal_y1 = goal_y0 + GOAL_WIDTH_M
+    lines.extend(_line_segment(0.0, goal_y0, 0.0, goal_y1, "goal-mouth-left"))
+    lines.extend(_line_segment(length, goal_y0, length, goal_y1, "goal-mouth-right"))
+    alpha = math.acos(min(1.0, (PENALTY_AREA_DEPTH_M - PENALTY_SPOT_M) / CENTER_CIRCLE_RADIUS_M))
+    arcs = [
+        *_arc_points(mid_x, mid_y, CENTER_CIRCLE_RADIUS_M, 0.0, 2.0 * math.pi, "center-circle"),
+        *_arc_points(PENALTY_SPOT_M, mid_y, CENTER_CIRCLE_RADIUS_M, -alpha, alpha, "penalty-arc-left"),
+        *_arc_points(
+            length - PENALTY_SPOT_M,
+            mid_y,
+            CENTER_CIRCLE_RADIUS_M,
+            math.pi - alpha,
+            math.pi + alpha,
+            "penalty-arc-right",
+        ),
+        *_arc_points(0.0, 0.0, CORNER_ARC_RADIUS_M, 0.0, math.pi / 2.0, "corner-sw"),
+        *_arc_points(0.0, width, CORNER_ARC_RADIUS_M, -math.pi / 2.0, 0.0, "corner-nw"),
+        *_arc_points(length, 0.0, CORNER_ARC_RADIUS_M, math.pi / 2.0, math.pi, "corner-se"),
+        *_arc_points(length, width, CORNER_ARC_RADIUS_M, math.pi, 3.0 * math.pi / 2.0, "corner-ne"),
+    ]
+    spots = [
+        {"x": mid_x, "y": mid_y, "group": "center-spot"},
+        {"x": PENALTY_SPOT_M, "y": mid_y, "group": "penalty-left"},
+        {"x": length - PENALTY_SPOT_M, "y": mid_y, "group": "penalty-right"},
+    ]
+    return {"stripes": stripes, "lines": lines, "arcs": arcs, "spots": spots}
+
+
+def _metre_scales(alt: Any) -> tuple[Any, Any, float, float]:
+    x0, x1 = -PITCH_PAD_M, PITCH_LENGTH + PITCH_PAD_M
+    y0, y1 = -PITCH_PAD_M, PITCH_WIDTH + PITCH_PAD_M
+    width = (x1 - x0) * PIXELS_PER_METRE
+    height = (y1 - y0) * PIXELS_PER_METRE
+    x_scale = alt.Scale(domain=[x0, x1], nice=False, zero=False)
+    # Same orientation as mplsoccer/matplotlib: y = 0 on the near touchline.
+    y_scale = alt.Scale(domain=[y0, y1], nice=False, zero=False, reverse=True)
+    return x_scale, y_scale, width, height
+
+
+def _pitch_layers(alt: Any, pd: Any, x_scale: Any, y_scale: Any) -> list[Any]:
+    geometry = _metric_pitch_geometry()
+    grass = (
+        alt.Chart(
+            pd.DataFrame(
+                {"x": [0.0], "x2": [PITCH_LENGTH], "y": [0.0], "y2": [PITCH_WIDTH]}
+            )
+        )
+        .mark_rect(color="#123a2d")
+        .encode(
+            x=alt.X("x:Q", scale=x_scale, axis=None),
+            x2=alt.X2("x2:Q"),
+            y=alt.Y("y:Q", scale=y_scale, axis=None),
+            y2=alt.Y2("y2:Q"),
+        )
+    )
+    stripes = (
+        alt.Chart(pd.DataFrame(geometry["stripes"]))
+        .mark_rect(color="#174735", opacity=0.85)
+        .encode(
+            x=alt.X("x:Q", scale=x_scale, axis=None),
+            x2=alt.X2("x2:Q"),
+            y=alt.Y("y:Q", scale=y_scale, axis=None),
+            y2=alt.Y2("y2:Q"),
+        )
+    )
+    final_third = (
+        alt.Chart(
+            pd.DataFrame(
+                {"x": [70.0], "x2": [PITCH_LENGTH], "y": [0.0], "y2": [PITCH_WIDTH]}
+            )
+        )
+        .mark_rect(color="#facc15", opacity=0.10)
+        .encode(
+            x=alt.X("x:Q", scale=x_scale, axis=None),
+            x2=alt.X2("x2:Q"),
+            y=alt.Y("y:Q", scale=y_scale, axis=None),
+            y2=alt.Y2("y2:Q"),
+        )
+    )
+    lines = (
+        alt.Chart(pd.DataFrame(geometry["lines"]))
+        .mark_line(color="#e2eee9", strokeWidth=1.6)
+        .encode(
+            x=alt.X("x:Q", scale=x_scale, axis=None),
+            y=alt.Y("y:Q", scale=y_scale, axis=None),
+            order="t:Q",
+            detail="group:N",
+        )
+    )
+    arcs = (
+        alt.Chart(pd.DataFrame(geometry["arcs"]))
+        .mark_line(color="#e2eee9", strokeWidth=1.6)
+        .encode(
+            x=alt.X("x:Q", scale=x_scale, axis=None),
+            y=alt.Y("y:Q", scale=y_scale, axis=None),
+            order="t:Q",
+            detail="group:N",
+        )
+    )
+    spots = (
+        alt.Chart(pd.DataFrame(geometry["spots"]))
+        .mark_point(filled=True, color="#e2eee9", size=28, opacity=1)
+        .encode(
+            x=alt.X("x:Q", scale=x_scale, axis=None),
+            y=alt.Y("y:Q", scale=y_scale, axis=None),
+        )
+    )
+    caption = (
+        alt.Chart(pd.DataFrame({"x": [87.5], "y": [2.2], "label": ["1/3 cuối sân"]}))
+        .mark_text(color="#fde68a", fontSize=11, baseline="bottom")
+        .encode(
+            x=alt.X("x:Q", scale=x_scale, axis=None),
+            y=alt.Y("y:Q", scale=y_scale, axis=None),
+            text="label:N",
+        )
+    )
+    return [grass, stripes, final_third, lines, arcs, spots, caption]
+
+
+def interactive_pitch_events(
+    items: Sequence[Event | ObservedActionV2],
+    *,
+    attack_relative: bool = True,
+) -> Any:
+    """Interactive 105×68 m pitch: events sit in metre coords, details on hover."""
+
+    try:
+        import altair as alt
+        import pandas as pd
+    except ImportError as error:
+        raise RuntimeError(
+            "Interactive pitch plots require pandas and altair (Streamlit demo extra)."
+        ) from error
+
+    views = pitch_event_views(items, attack_relative=attack_relative)
+    if not views:
+        raise ValueError("attack has no pitch coordinates to plot")
+
+    x_scale, y_scale, width, height = _metre_scales(alt)
+    event_rows = []
+    for index, view in enumerate(views, start=1):
+        lines = [line for line in view.annotation.split("\n") if line]
+        event_rows.append(
+            {
+                "x": view.x,
+                "y": view.y,
+                "index": str(index),
+                "action_label": _action_label(view.action_type),
+                "shape": "triangle-up" if view.action_type in SHOT_ACTION_TYPES else "circle",
+                "size": 280 if view.action_type in SHOT_ACTION_TYPES else 170,
+                "stroke": "#f97316" if view.opponent else "#ffffff",
+                "title": lines[0] if lines else _action_label(view.action_type),
+                "detail": " · ".join(lines[1:]),
+                "hover": view.annotation,
+            }
+        )
+    events = pd.DataFrame(event_rows)
+    present_labels = tuple(dict.fromkeys(row["action_label"] for row in event_rows))
+    present_types = tuple(dict.fromkeys(view.action_type for view in views))
+    color_range = [ACTION_COLORS.get(action, "#e2e8f0") for action in present_types]
+
+    link_rows: list[dict[str, float | str]] = []
+    for start, end in zip(views, views[1:]):
+        link_rows.append(
+            {
+                "x": start.x,
+                "y": start.y,
+                "x2": end.x,
+                "y2": end.y,
+                "kind": "sequence",
+            }
+        )
+    for view in views:
+        if view.end_x is None or view.end_y is None:
+            continue
+        link_rows.append(
+            {
+                "x": view.x,
+                "y": view.y,
+                "x2": float(view.end_x),
+                "y2": float(view.end_y),
+                "kind": "target",
+            }
+        )
+
+    layers: list[Any] = _pitch_layers(alt, pd, x_scale, y_scale)
+    if link_rows:
+        layers.append(
+            alt.Chart(pd.DataFrame(link_rows))
+            .mark_rule(opacity=0.55)
+            .encode(
+                x=alt.X("x:Q", scale=x_scale, axis=None),
+                y=alt.Y("y:Q", scale=y_scale, axis=None),
+                x2=alt.X2("x2:Q"),
+                y2=alt.Y2("y2:Q"),
+                color=alt.Color(
+                    "kind:N",
+                    scale=alt.Scale(
+                        domain=["sequence", "target"],
+                        range=["#f8fafc", "#7dd3fc"],
+                    ),
+                    legend=None,
+                ),
+                strokeWidth=alt.condition(
+                    alt.datum.kind == "target",
+                    alt.value(2.2),
+                    alt.value(1.4),
+                ),
+            )
+        )
+    layers.append(
+        alt.Chart(events)
+        .mark_point(filled=True, opacity=1)
+        .encode(
+            x=alt.X("x:Q", scale=x_scale, axis=None),
+            y=alt.Y("y:Q", scale=y_scale, axis=None),
+            color=alt.Color(
+                "action_label:N",
+                scale=alt.Scale(domain=list(present_labels), range=color_range),
+                legend=alt.Legend(
+                    title="Loại",
+                    orient="bottom",
+                    columns=min(5, len(present_labels)),
+                ),
+            ),
+            shape=alt.Shape("shape:N", legend=None),
+            size=alt.Size("size:Q", legend=None),
+            stroke=alt.Stroke(
+                "stroke:N",
+                scale=alt.Scale(domain=["#f97316", "#ffffff"], range=["#f97316", "#ffffff"]),
+                legend=None,
+            ),
+            strokeWidth=alt.value(1.8),
+            tooltip=[
+                alt.Tooltip("title:N", title="Hành động"),
+                alt.Tooltip("detail:N", title="Chi tiết"),
+            ],
+        )
+    )
+    layers.append(
+        alt.Chart(events)
+        .mark_text(fontSize=10, fontWeight="bold", color="#071a14")
+        .encode(
+            x=alt.X("x:Q", scale=x_scale, axis=None),
+            y=alt.Y("y:Q", scale=y_scale, axis=None),
+            text="index:N",
+        )
+    )
+    return (
+        alt.layer(*layers)
+        .resolve_scale(x="shared", y="shared")
+        .properties(
+            width=width,
+            height=height,
+            title="Hướng tấn công  →",
+        )
+        .configure(background="#0e3026", autosize={"type": "none"})
+        .configure_view(
+            strokeWidth=0,
+            fill="#0e3026",
+            continuousWidth=width,
+            continuousHeight=height,
+        )
+        .configure_title(color="#ffffff", fontSize=13, anchor="end", font="sans-serif")
+        .configure_legend(
+            labelColor="#e2e8f0",
+            titleColor="#e2e8f0",
+            symbolStrokeColor="#ffffff",
+        )
+    )
 
 
 def plot_freeze_frame(

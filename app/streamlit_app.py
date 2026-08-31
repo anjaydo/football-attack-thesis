@@ -42,8 +42,8 @@ _pitch_visualization = importlib.reload(_pitch_visualization)
 BROWSER_CODECS = _browser_video.BROWSER_CODECS
 sample_preview_frames = _browser_video.sample_preview_frames
 video_codec = _browser_video.video_codec
-plot_pitch_events = _pitch_visualization.plot_pitch_events
 plot_freeze_frame = _pitch_visualization.plot_freeze_frame
+interactive_pitch_events = _pitch_visualization.interactive_pitch_events
 build_footpass_dynamic_projector = _dynamic_calibration.build_footpass_dynamic_projector
 from attack_analysis.event_calibration import load_event_thresholds
 from attack_analysis.attack_v2 import FootpassAttackV2Config, decode_footpass_attack_v2
@@ -124,10 +124,12 @@ def show_event_pitch(items, *, heading: str, caption: str, attack_relative: bool
     if not positioned:
         return
     st.subheader(heading)
-    st.caption(caption)
-    pitch_figure = plot_pitch_events(positioned, attack_relative=attack_relative)
-    st.pyplot(pitch_figure, width="stretch")
-    plt.close(pitch_figure)
+    st.caption(
+        caption
+        + " Di chuột vào một điểm trên sân để xem chi tiết — nhãn không chồng lên bản đồ."
+    )
+    chart = interactive_pitch_events(positioned, attack_relative=attack_relative)
+    st.altair_chart(chart, width="content", theme=None)
 
 
 def show_yolo_overlay(path: Path, *, heading: str) -> None:
@@ -474,8 +476,8 @@ def render_attack(sequence: AttackSequence, bundle: EvidenceBundle, video_path: 
         sequence.events,
         heading="Bản đồ đợt tấn công" if assessment.is_attack else "Bản đồ chuỗi possession",
         caption=(
-            "Sân mplsoccer 105 × 68 m, hướng tấn công từ trái sang phải. "
-            "Mỗi điểm có chú thích đầy đủ nội dung event."
+            "Sân 105 × 68 m (tỉ lệ bóng đá, 1 m ngang = 1 m dọc), hướng tấn công trái → phải. "
+            "Hover từng điểm để đọc đầy đủ nội dung event."
         ),
     )
 
@@ -847,10 +849,10 @@ def render_calibrated_window(
         st.dataframe(pd.DataFrame(timeline_rows), width="stretch", hide_index=True)
         show_event_pitch(
             window_events,
-            heading="Bản đồ event trong cửa sổ (mplsoccer)",
+            heading="Bản đồ event trong cửa sổ",
             caption=(
-                "Mỗi điểm trên sân tương ứng một event trong cửa sổ, kèm chú thích đầy đủ "
-                "thời điểm, đội, cầu thủ, tọa độ, kết quả và độ tin cậy."
+                "Mỗi điểm trên sân tương ứng một event trong cửa sổ. "
+                "Hover để xem thời điểm, đội, cầu thủ, tọa độ, kết quả và độ tin cậy."
             ),
         )
     else:
@@ -1470,11 +1472,11 @@ with analysis_tab:
             )
             show_event_pitch(
                 pitch_actions,
-                heading="Bản đồ event trên sân (mplsoccer)",
+                heading="Bản đồ event trên sân",
                 caption=(
                     "Tọa độ possession-relative: mọi điểm cùng hướng tấn công của đội kiểm soát "
                     "(x → 105). Viền cam = hành động đối phương. "
-                    "Kết quả (gold/terminal/action) và provenance được chú thích tại mỗi điểm."
+                    "Hover từng điểm để xem kết quả (gold/terminal/action) và provenance."
                 ),
                 attack_relative=True,
             )
