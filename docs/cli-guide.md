@@ -58,7 +58,9 @@ CLI hiện có mười lăm command:
 | `quality-report` | Validate JSONL và đo coverage của detection/tracking/pose |
 | `infer-events` | Suy luận possession/carry/pass/turnover từ calibrated tracks |
 | `run-pipeline` | Chạy video→quality→events→attacks trong một command |
-| `doctor` | Kiểm tra Python, package vision, CUDA, FFmpeg và readiness |
+| `doctor` | Kiểm tra Python, package vision, CUDA, FFmpeg, sync video và tiến độ gold |
+| `gold-status` | Tiến độ nhãn 12 trận, không đọc frozen test (P11) |
+| `inspect-video-sync` | Dual-video roots, sync JSON, overlay cache key, file thiếu |
 | `soccernet-download` | Tải riêng một sequence GameState từ archive SoccerNet bằng HTTP Range |
 | `soccernet-analyze` | Phân tích ground-truth track, vai trò, đội, tọa độ sân và vận tốc |
 | `field-geometry` | Trích pitch mask, line segments và intersections từ một frame |
@@ -570,8 +572,13 @@ Có thể gọi module trực tiếp bằng đúng Python trong venv:
 ### Ball F1 thấp
 
 Không xử lý bằng cách hạ confidence tùy ý. Chạy `benchmark-ball`; nếu recall vẫn
-thấp ở threshold `0.01`, model đang lệch domain và bắt buộc fine-tune. Xem quy
-trình dataset/train/validation trong `docs/ball-accuracy-plan.md`.
+thấp ở threshold `0.01`, model đang lệch domain và bắt buộc fine-tune GPU
+`imgsz=1280`. Path FOOTPASS+HDF5 không chờ gate này. Xem `docs/ball-accuracy-plan.md`.
+
+### Calibration coverage 0% / overlay lệch đồng hồ
+
+Chạy `inspect-video-sync` và đối chiếu `FOOTPASS_VIDEO_SYNC_JSON` (offset/fps).
+Replay/bbox NaN không được ngoại suy. Checklist: `docs/ops-checklist.md`.
 
 ### Skeleton chập chờn
 

@@ -18,16 +18,19 @@ from .detection_evaluation import (
     benchmark_ball_jsonl,
     evaluate_soccernet_jsonl,
 )
-from .environment import environment_report
+from .environment import default_inference_imgsz, default_torch_device, environment_report
 from .field_geometry import FieldLineConfig, analyze_field_image
 from .annotations import build_annotation_manifest, stratified_annotation_sample
 from .gold_annotations import (
+    DEVELOPMENT_MATCHES,
     FROZEN_TEST_MATCHES,
     GOLD_SCHEMA_VERSION,
     GoldSequenceAnnotationV2,
+    HUMAN_TRAIN_MATCHES,
     annotation_content_hash,
     build_gold_manifest,
     freeze_sealed_test_annotations,
+    gold_progress_report,
     gold_split,
     intra_rater_report,
     read_gold_annotations_jsonl,
@@ -62,13 +65,26 @@ from .release_control import (
     write_frozen_release_manifest,
 )
 from .provenance import content_sha256
+from .prediction_sources import (
+    DEFAULT_FOOTPASS_ROOT,
+    PredictionSourceError,
+    decide_role,
+    load_registry,
+    official_footpass_score,
+    register_prediction_source,
+    registry_report,
+    resolve_prediction_source,
+)
 from .research_evaluation import action_spotting_dataset_report, rare_action_class_audit
 from .sequence_evaluation import evaluate_acceptance_gates, sequence_evaluation_report
 from .geometry import PitchProjector
 from .llm import DeterministicEvidenceClient
 from .ml import train_effectiveness_models, train_xg_models
+from .env import xg_v2_model_path
+from .shot_xg import ShotXGRequiredError, score_analysis_shots
 from .xg_data import export_statsbomb_xg_dataset, export_statsbomb_xg_v2_dataset
 from .xg_training_v2 import XGTrainingV2Config, train_xg_v2_models
+from .xg_v2 import load_trained_xg_v2_model
 from .models import AttackSequence, Event
 from .models import (
     ATTACK_V2_RUBRIC_VERSION,
@@ -84,6 +100,7 @@ from .segmentation import SegmentationConfig, segment_attacks
 from .soccernet import analyze_gamestate_sequence, download_gamestate_sequence
 from .training import train_ball_model
 from .video import inspect_video
+from .video_paths import operations_report
 from .vision_pipeline import VisionConfig, annotate_video
 from .yolo_dataset import export_soccernet_ball_dataset
 
@@ -113,10 +130,13 @@ COMMANDS = {
     "verify-attack-v2-release",
     "attack-v2-final-test-status",
     "calibrate-footpass-events",
+    "prediction-sources",
+    "swap-prediction-source",
     "build-annotations",
     "build-gold-manifest",
     "validate-gold-annotations",
     "gold-intra-rater",
+    "gold-status",
     "seal-gold-test",
     "verify-gold-test-seal",
     "build-xg-dataset",
@@ -129,6 +149,7 @@ COMMANDS = {
     "build-footpass-benchmarks",
     "build-historical-snapshot",
     "attack-v2-overview",
+    "inspect-video-sync",
     "serve-mcp",
 }
 
@@ -168,8 +189,8 @@ def build_parser() -> argparse.ArgumentParser:
     annotate_parser.add_argument("--ball-class-id", type=int, default=32)
     annotate_parser.add_argument("--player-tracker", default="botsort.yaml")
     annotate_parser.add_argument("--ball-tracker", default="bytetrack.yaml")
-    annotate_parser.add_argument("--device", default="cpu")
-    annotate_parser.add_argument("--imgsz", type=int, default=960)
+    annotate_parser.add_argument("--device", default=default_torch_device())
+    annotate_parser.add_argument("--imgsz", type=int, default=default_inference_imgsz())
     annotate_parser.add_argument("--player-conf", type=float, default=0.2)
     annotate_parser.add_argument("--ball-conf", type=float, default=0.15)
     annotate_parser.add_argument("--keypoint-conf", type=float, default=0.25)
@@ -194,6 +215,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--filter-ball-by-roi",
         action="store_true",
         help="Restrict ball centers to the pitch ROI; unsafe for high airborne balls",
+    )
+    annotate_parser.add_argument(
+        "--no-pose-crop",
+        action="store_true",
+        help="Skip the second pose pass on player crops",
+    )
+    annotate_parser.add_argument("--pose-crop-imgsz", type=int, default=320)
+    annotate_parser.add_argument(
+        "--ball-tile-size",
+        type=int,
+        default=0,
+        help=(
+            "Sliding-window side in pixels so a ~12px ball is upscaled. 0 (default) disables; "
+            "tiles cut F1 to 0.136 with the COCO ball model on SNGS-033, so enable only with a "
+            "fine-tuned --ball-model."
+        ),
+    )
+    annotate_parser.add_argument("--ball-tile-overlap", type=float, default=0.1)
+    annotate_parser.add_argument(
+        "--ball-max-side",
+        type=float,
+        default=80.0,
+        help="Drop ball boxes larger than this many pixels. 0 disables.",
     )
 
     quality_parser = subparsers.add_parser(
@@ -235,8 +279,8 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_parser.add_argument("--detection-model", default="yolo26n.pt")
     pipeline_parser.add_argument("--ball-model")
     pipeline_parser.add_argument("--ball-class-id", type=int, default=32)
-    pipeline_parser.add_argument("--device", default="cpu")
-    pipeline_parser.add_argument("--imgsz", type=int, default=960)
+    pipeline_parser.add_argument("--device", default=default_torch_device())
+    pipeline_parser.add_argument("--imgsz", type=int, default=default_inference_imgsz())
     pipeline_parser.add_argument("--player-conf", type=float, default=0.2)
     pipeline_parser.add_argument("--ball-conf", type=float, default=0.15)
     pipeline_parser.add_argument("--roi", type=Path)
@@ -249,6 +293,11 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_parser.add_argument("--field-line-min-length", type=float, default=0.06)
     pipeline_parser.add_argument("--field-line-max-segments", type=int, default=40)
     pipeline_parser.add_argument("--filter-ball-by-roi", action="store_true")
+    pipeline_parser.add_argument("--no-pose-crop", action="store_true")
+    pipeline_parser.add_argument("--pose-crop-imgsz", type=int, default=320)
+    pipeline_parser.add_argument("--ball-tile-size", type=int, default=0)
+    pipeline_parser.add_argument("--ball-tile-overlap", type=float, default=0.1)
+    pipeline_parser.add_argument("--ball-max-side", type=float, default=80.0)
     pipeline_parser.add_argument(
         "--team-a-direction", choices=("left", "right"), default="right"
     )
@@ -338,23 +387,50 @@ def build_parser() -> argparse.ArgumentParser:
     ball_training_parser.add_argument("--epochs", type=int, default=100)
     ball_training_parser.add_argument("--imgsz", type=int, default=1280)
     ball_training_parser.add_argument("--batch", type=int, default=4)
-    ball_training_parser.add_argument("--device", default="cpu")
+    ball_training_parser.add_argument("--device", default=default_torch_device())
     ball_training_parser.add_argument("--workers", type=int, default=0)
     ball_training_parser.add_argument("--name", default="soccernet-ball")
+    ball_training_parser.add_argument(
+        "--allow-cpu",
+        action="store_true",
+        help="Permit imgsz=1280 training on CPU (smoke only; hours per epoch)",
+    )
+
+    inspect_sync_parser = subparsers.add_parser(
+        "inspect-video-sync",
+        help="Check FOOTPASS dual-video roots, sync JSON, overlay cache key and missing files",
+    )
+    inspect_sync_parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=Path.cwd(),
+    )
 
     footpass_parser = subparsers.add_parser(
         "footpass-ingest",
         help="Adapt one FOOTPASS half to v2 possessions/strict attacks; retain V1 as legacy candidates",
     )
-    footpass_parser.add_argument("playbyplay", type=Path)
+    footpass_parser.add_argument(
+        "playbyplay",
+        type=Path,
+        nargs="?",
+        help="Play-by-play JSON; omit when --prediction-source picks a registered file",
+    )
     footpass_parser.add_argument("match_key")
     footpass_parser.add_argument("--source", choices=("oracle", "predicted"), default="oracle")
+    footpass_parser.add_argument(
+        "--prediction-source",
+        help="Registered predicted source id (models/prediction-sources.json); implies --source predicted",
+    )
+    footpass_parser.add_argument("--prediction-registry", type=Path)
     footpass_parser.add_argument("--tactical-h5", type=Path)
     footpass_parser.add_argument("--fps", type=float, default=25.0)
     footpass_parser.add_argument("--min-confidence", type=float, default=0.15)
     footpass_parser.add_argument("--model-name")
     footpass_parser.add_argument(
-        "--xg-model", type=Path, help="Leakage-safe trained xG artifact used for shot events"
+        "--xg-model",
+        type=Path,
+        help="StatsBomb-trained xG-v2 joblib. Sequences that end on event type shot are scored with it.",
     )
     footpass_parser.add_argument(
         "--event-threshold-profile", type=Path, help="Class-aware predicted-event calibration JSON"
@@ -461,6 +537,32 @@ def build_parser() -> argparse.ArgumentParser:
     footpass_evaluation_parser.add_argument("--model-name", default="predicted")
     footpass_evaluation_parser.add_argument("--event-threshold-profile", type=Path)
 
+    prediction_sources_parser = subparsers.add_parser(
+        "prediction-sources",
+        help="List registered FOOTPASS prediction files, their official F1 and hash status",
+    )
+    prediction_sources_parser.add_argument("--registry", type=Path)
+
+    swap_source_parser = subparsers.add_parser(
+        "swap-prediction-source",
+        help=(
+            "Score a new FOOTPASS prediction JSON with the official evaluator and register it; "
+            "it becomes primary only if micro-F1 beats the current primary"
+        ),
+    )
+    swap_source_parser.add_argument("predictions", type=Path)
+    swap_source_parser.add_argument("--kind", choices=("TAAD", "DST"), required=True)
+    swap_source_parser.add_argument("--id", dest="source_id", required=True)
+    swap_source_parser.add_argument("--registry", type=Path)
+    swap_source_parser.add_argument("--footpass-root", type=Path)
+    swap_source_parser.add_argument("--ground-truth", type=Path)
+    swap_source_parser.add_argument("--checkpoint", type=Path)
+    swap_source_parser.add_argument("--threshold-profile", type=Path)
+    swap_source_parser.add_argument("--note", default="")
+    swap_source_parser.add_argument(
+        "--dry-run", action="store_true", help="Score and report the gate decision without registering"
+    )
+
     event_calibration_parser = subparsers.add_parser(
         "calibrate-footpass-events",
         help="Fit per-action confidence thresholds on named matches and report held-out results",
@@ -517,6 +619,18 @@ def build_parser() -> argparse.ArgumentParser:
     gold_agreement_parser.add_argument("first_round", type=Path)
     gold_agreement_parser.add_argument("second_round", type=Path)
     gold_agreement_parser.add_argument("--allow-frozen-test", action="store_true")
+
+    gold_status_parser = subparsers.add_parser(
+        "gold-status",
+        help="Report 12-match gold progress without opening frozen-test labels (P11 stays open)",
+    )
+    gold_status_parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=Path.cwd(),
+        help="Directory containing data/attack-v2-*.jsonl",
+    )
+    gold_status_parser.add_argument("--sealed-directory", type=Path)
 
     gold_seal_parser = subparsers.add_parser(
         "seal-gold-test",
@@ -827,6 +941,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         result = _evaluate_file(args.input)
     elif args.command == "doctor":
         result = environment_report()
+        result["operations"] = operations_report(
+            Path.cwd(),
+            expected_match_ids=tuple(
+                f"game_{number}"
+                for number in HUMAN_TRAIN_MATCHES + DEVELOPMENT_MATCHES + FROZEN_TEST_MATCHES
+            ),
+        )
+        result["gold"] = gold_progress_report(Path.cwd())
     elif args.command == "soccernet-download":
         result = download_gamestate_sequence(
             args.output_directory, args.split, args.sequence
@@ -886,8 +1008,23 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.device,
             args.workers,
             args.name,
+            allow_cpu=args.allow_cpu,
         )
     elif args.command == "footpass-ingest":
+        prediction_source = None
+        if args.prediction_source:
+            if args.playbyplay is not None:
+                raise SystemExit("pass either a playbyplay path or --prediction-source, not both")
+            try:
+                prediction_source, args.playbyplay = resolve_prediction_source(
+                    args.prediction_source, args.prediction_registry
+                )
+            except PredictionSourceError as error:
+                raise SystemExit(str(error)) from error
+            args.source = "predicted"
+            args.model_name = args.model_name or prediction_source.model_name
+        elif args.playbyplay is None:
+            raise SystemExit("footpass-ingest needs a playbyplay path or --prediction-source")
         thresholds = (
             load_event_thresholds(args.event_threshold_profile)
             if args.event_threshold_profile
@@ -934,6 +1071,23 @@ def main(argv: Sequence[str] | None = None) -> None:
                 min_events=args.min_events,
             ),
         )
+        model_path = args.xg_model if args.xg_model is not None else xg_v2_model_path(
+            Path(__file__).resolve().parents[2]
+        )
+        loaded_xg = (
+            load_trained_xg_v2_model(model_path, allow_research_only=True)
+            if model_path.is_file()
+            else None
+        )
+        try:
+            xg_payload = score_analysis_shots(
+                decoded.attacks,
+                decoded.possessions,
+                model=loaded_xg,
+                tactical_h5=args.tactical_h5,
+            )
+        except ShotXGRequiredError as error:
+            raise SystemExit(str(error)) from error
         result = {
             "schema_version": "attack-v2-run/2.0",
             "source_tier": (
@@ -950,21 +1104,24 @@ def main(argv: Sequence[str] | None = None) -> None:
                 )
             ),
             "match_key": args.match_key,
+            "prediction_source": (
+                None
+                if prediction_source is None
+                else {
+                    "id": prediction_source.id,
+                    "kind": prediction_source.kind,
+                    "role": prediction_source.role,
+                    "sha256": prediction_source.sha256,
+                    "official_micro_f1": prediction_source.micro_f1,
+                }
+            ),
             "summary": {
                 **footpass_v2_summary(decoded, prepared),
                 "observed_action_count": len(observed_actions),
             },
             "observed_actions": [item.to_dict() for item in observed_actions],
             **decoded.to_dict(),
-            "xg": {
-                "status": "withheld",
-                "reason": (
-                    "xG-v1 is not attached before a v2 terminal is independently confirmed; "
-                    "the supplied model path was ignored"
-                    if args.xg_model is not None
-                    else "no xG-v2 model supplied"
-                ),
-            },
+            "xg": xg_payload,
             "legacy_compatibility": {
                 "output_type": "PossessionCandidateV1",
                 "summary": footpass_summary(events, legacy_candidates),
@@ -1157,6 +1314,36 @@ def main(argv: Sequence[str] | None = None) -> None:
             predictions,
             tolerance_frames=args.delta,
         )
+    elif args.command == "prediction-sources":
+        result = registry_report(args.registry)
+    elif args.command == "swap-prediction-source":
+        footpass_root = args.footpass_root or DEFAULT_FOOTPASS_ROOT
+        score = official_footpass_score(
+            args.predictions,
+            footpass_root=footpass_root,
+            ground_truth=args.ground_truth,
+        )
+        if args.dry_run:
+            primary = load_registry(args.registry).primary
+            result = {
+                "dry_run": True,
+                "official": score.to_dict(),
+                "would_be_role": decide_role(args.kind, score.micro_f1, primary),
+                "current_primary": None if primary is None else primary.id,
+                "current_primary_micro_f1": None if primary is None else primary.micro_f1,
+            }
+        else:
+            result = register_prediction_source(
+                args.predictions,
+                source_id=args.source_id,
+                kind=args.kind,
+                score=score,
+                registry_path=args.registry,
+                store_directory=Path(footpass_root) / "playbyplay_PRED",
+                checkpoint=args.checkpoint,
+                threshold_profile=args.threshold_profile,
+                note=args.note,
+            )
     elif args.command == "calibrate-footpass-events":
         ground_truth_keys = set(footpass_match_keys(args.ground_truth))
         prediction_keys = set(footpass_match_keys(args.predictions))
@@ -1245,6 +1432,19 @@ def main(argv: Sequence[str] | None = None) -> None:
             allow_frozen_test=args.allow_frozen_test,
         )
         result = intra_rater_report(first_round, second_round)
+    elif args.command == "gold-status":
+        result = gold_progress_report(
+            args.project_root,
+            sealed_directory=args.sealed_directory,
+        )
+    elif args.command == "inspect-video-sync":
+        result = operations_report(
+            args.project_root,
+            expected_match_ids=tuple(
+                f"game_{number}"
+                for number in HUMAN_TRAIN_MATCHES + DEVELOPMENT_MATCHES + FROZEN_TEST_MATCHES
+            ),
+        )
     elif args.command == "seal-gold-test":
         seal_path = freeze_sealed_test_annotations(
             args.sealed_directory,
@@ -1417,6 +1617,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                 field_line_min_length_ratio=args.field_line_min_length,
                 field_line_max_segments=args.field_line_max_segments,
                 filter_ball_by_roi=args.filter_ball_by_roi,
+                pose_on_crop=not args.no_pose_crop,
+                pose_crop_imgsz=args.pose_crop_imgsz,
+                ball_tile_size=args.ball_tile_size,
+                ball_tile_overlap=args.ball_tile_overlap,
+                ball_max_side_px=args.ball_max_side,
             ),
             projector,
             roi,
@@ -1458,6 +1663,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                 field_line_min_length_ratio=args.field_line_min_length,
                 field_line_max_segments=args.field_line_max_segments,
                 filter_ball_by_roi=args.filter_ball_by_roi,
+                pose_on_crop=not args.no_pose_crop,
+                pose_crop_imgsz=args.pose_crop_imgsz,
+                ball_tile_size=args.ball_tile_size,
+                ball_tile_overlap=args.ball_tile_overlap,
+                ball_max_side_px=args.ball_max_side,
             ),
             projector,
             args.observations,
