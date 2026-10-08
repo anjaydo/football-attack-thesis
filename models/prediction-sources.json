@@ -1,0 +1,94 @@
+{
+  "schema_version": "prediction-sources/1.0",
+  "primary": "DST_v1",
+  "sources": [
+    {
+      "id": "DST_v1",
+      "kind": "DST",
+      "path": "../../FOOTPASS/playbyplay_PRED/playbyplay_DST_val.json",
+      "sha256": "34ef3f16233bd2e64cc5336e6f9a6e2c623d724c0517e09b91a99665f03c5741",
+      "role": "primary",
+      "official": {
+        "micro_f1": 0.719,
+        "precision": 0.735,
+        "recall": 0.703,
+        "true_positives": 4267,
+        "false_positives": 1539,
+        "false_negatives": 1803,
+        "ground_truth": 6070,
+        "delta": 12,
+        "confidence_threshold": 0.15
+      },
+      "checkpoint_sha256": null,
+      "threshold_profile": "dst-thresholds-v1.json",
+      "registered_at": "2026-10-05T05:32:06+00:00",
+      "note": "Original DST baseline; thresholds-v1 fitted on game_18"
+    },
+    {
+      "id": "TAAD_v1",
+      "kind": "TAAD",
+      "path": "../../FOOTPASS/playbyplay_PRED/playbyplay_TAAD_val.json",
+      "sha256": "f50ed4aaa6d01289d71609032e310009cceae915a87bd2f3515674f71a5eb26d",
+      "role": "ablation",
+      "official": {
+        "micro_f1": 0.41,
+        "precision": 0.304,
+        "recall": 0.63,
+        "true_positives": 3822,
+        "false_positives": 8754,
+        "false_negatives": 2248,
+        "ground_truth": 6070,
+        "delta": 12,
+        "confidence_threshold": 0.15
+      },
+      "checkpoint_sha256": null,
+      "threshold_profile": null,
+      "registered_at": "2026-10-05T05:32:22+00:00",
+      "note": "Original TAAD checkpoint, raw output"
+    },
+    {
+      "id": "TAAD_h100",
+      "kind": "TAAD",
+      "path": "../../FOOTPASS/playbyplay_PRED/playbyplay_TAAD_h100_val.json",
+      "sha256": "6240b0356d90bfeda35d1db202b805dc2ad2bd0f187f3450bf4f26e99e02518b",
+      "role": "ablation",
+      "official": {
+        "micro_f1": 0.346,
+        "precision": 0.244,
+        "recall": 0.599,
+        "true_positives": 3634,
+        "false_positives": 11272,
+        "false_negatives": 2436,
+        "ground_truth": 6070,
+        "delta": 12,
+        "confidence_threshold": 0.15
+      },
+      "checkpoint_sha256": "4ac120d8adeb423cd82183edc007136f92f31c8d65b0667f40ebe3affe1f0076",
+      "threshold_profile": null,
+      "registered_at": "2026-10-05T08:07:31+00:00",
+      "note": "H100 TAAD best_model (val CE 0.02704, epoch 19), inferred locally on RTX 4050 batch 4 from D:\\videos"
+    },
+    {
+      "id": "DST_h100",
+      "kind": "DST",
+      "path": "../../FOOTPASS/playbyplay_PRED/playbyplay_DST_h100_val.json",
+      "sha256": "1beba6ae95948f616fb2fea1bf4d631768ea5756aff29f6cbdbf6d386f8768ab",
+      "role": "ablation",
+      "official": {
+        "micro_f1": 0.688,
+        "precision": 0.706,
+        "recall": 0.671,
+        "true_positives": 4076,
+        "false_positives": 1700,
+        "false_negatives": 1994,
+        "ground_truth": 6070,
+        "delta": 12,
+        "confidence_threshold": 0.15
+      },
+      "checkpoint_sha256": "f0acbab02fefc4a0f4c0a747b8f40197b388ba00426a507762e1526a001ddefa",
+      "threshold_profile": null,
+      "registered_at": "2026-10-06T17:25:17+00:00",
+      "note": "H100 DST full pipeline, 15 epochs. micro-F1 0.688 is below DST_v1 0.719 so this stays an ablation. The delivered JSON first landed on playbyplay_DST_val.json and overwrote the DST_v1 bytes."
+    }
+  ]
+}

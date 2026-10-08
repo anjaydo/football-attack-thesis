@@ -46,6 +46,11 @@ attack-analysis footpass-ingest `
   --output runs\game_18_H1.predicted.json
 ```
 
+Prefer the versioned registry (`attack-analysis footpass-ingest game_18_H1
+--prediction-source DST_v1 ...`); it pins the JSON by SHA-256 and records the
+official micro-F1. Replacing DST later is one gated command, see
+[prediction-sources.md](prediction-sources.md).
+
 The current output contains `ObservedActionV2`, possessions and strict attacks.
 The old segments are nested only under `legacy_compatibility` as
 `PossessionCandidateV1`. xG is withheld until a v2 terminal and xG-v2 feature
