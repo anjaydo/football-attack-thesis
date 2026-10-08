@@ -4,12 +4,14 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from .footpass import split_footpass_match_key
 
 DEFAULT_MATCH_FPS = 25.0
 VIDEO_SYNC_SCHEMA = "footpass-video-sync/1.0"
+OVERLAY_CACHE_KEY = "fullhd_pose_crop_ball_fullframe_v6"
+CALIBRATION_CACHE_KEY = "footpass_dynamic_roi_homography_v3_temporal"
 
 
 @dataclass(frozen=True)
@@ -214,6 +216,77 @@ def _configured_preview_root() -> Path | None:
     if not raw:
         return None
     return Path(raw)
+
+
+def operations_report(
+    project_root: Path,
+    *,
+    expected_match_ids: Sequence[str] | None = None,
+) -> dict[str, object]:
+    """Inspect dual-video roots, sync JSON, overlay cache key, and missing files."""
+
+    resolver = VideoPathResolver.from_environment(Path(project_root))
+    sync_exists = resolver.sync_path is not None and resolver.sync_path.is_file()
+    schema_version = None
+    listed: list[str] = []
+    if sync_exists:
+        payload = json.loads(resolver.sync_path.read_text(encoding="utf-8"))
+        schema_version = payload.get("schema_version")
+        matches = payload.get("matches") or {}
+        if isinstance(matches, Mapping):
+            listed = sorted(str(key) for key in matches)
+
+    expected = list(expected_match_ids or ())
+    warnings: list[str] = []
+    if resolver.sync_path is None or not sync_exists:
+        warnings.append(
+            "FOOTPASS_VIDEO_SYNC_JSON missing — preview/HDF5 clock uses offset 0s; "
+            "calibration coverage can drop to 0% on Full HD windows"
+        )
+    elif schema_version not in {None, VIDEO_SYNC_SCHEMA}:
+        warnings.append(
+            f"sync schema {schema_version!r} is not {VIDEO_SYNC_SCHEMA}"
+        )
+
+    match_rows: list[dict[str, object]] = []
+    ids_to_check = list(dict.fromkeys([*listed, *expected]))
+    for match_id in ids_to_check:
+        match_key = match_id if "_H" in match_id else f"{match_id}_H1"
+        preview = resolver.preview_path(match_key)
+        processing = resolver.processing_path(match_key)
+        sync = resolver._sync_lookup(match_key)
+        row = {
+            "match_id": match_id,
+            "in_sync_file": sync is not None,
+            "preview_exists": preview.is_file(),
+            "processing_exists": processing.is_file(),
+            "preview_offset_sec": sync.preview_offset_sec if sync is not None else 0.0,
+            "processing_fps": sync.processing_fps if sync is not None else resolver.default_match_fps,
+        }
+        match_rows.append(row)
+        if expected and match_id in expected and sync is None and sync_exists:
+            warnings.append(f"{match_id} has no sync entry")
+        if resolver.preview_root is not None and not preview.is_file():
+            warnings.append(f"Full HD preview missing: {preview}")
+        if not processing.is_file():
+            warnings.append(f"processing video missing: {processing}")
+
+    preview_root = resolver.preview_root
+    return {
+        "overlay_cache_key": OVERLAY_CACHE_KEY,
+        "calibration_cache_key": CALIBRATION_CACHE_KEY,
+        "processing_root": str(resolver.processing_root),
+        "preview_root": None if preview_root is None else str(preview_root),
+        "sync_path": None if resolver.sync_path is None else str(resolver.sync_path),
+        "sync_exists": bool(sync_exists),
+        "sync_schema": schema_version,
+        "matches": match_rows,
+        "warnings": warnings,
+        "note": (
+            "Replay/bbox-NaN frames stay ineligible for oracle homography. "
+            "Old window-cache entries stay low-res until overlay_cache_key or sync mtime changes."
+        ),
+    }
 
 
 def _configured_sync_path(project_root: Path) -> Path | None:

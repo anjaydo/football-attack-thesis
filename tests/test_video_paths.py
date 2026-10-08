@@ -6,7 +6,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from attack_analysis.video_paths import PreviewClockProjector, VideoPathResolver
+from attack_analysis.video_paths import (
+    OVERLAY_CACHE_KEY,
+    PreviewClockProjector,
+    VideoPathResolver,
+    operations_report,
+)
 
 
 class VideoPathResolverTests(unittest.TestCase):
@@ -83,6 +88,30 @@ class VideoPathResolverTests(unittest.TestCase):
                 )
                 self.assertEqual(projector.for_frame(575), 250)
                 self.assertEqual(inner.seen, [250])
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+
+    def test_operations_report_flags_missing_sync_and_exposes_overlay_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            previous = {
+                "FOOTPASS_VIDEOS_DIR": os.environ.get("FOOTPASS_VIDEOS_DIR"),
+                "FOOTPASS_FULLHD_VIDEOS_DIR": os.environ.get("FOOTPASS_FULLHD_VIDEOS_DIR"),
+                "FOOTPASS_VIDEO_SYNC_JSON": os.environ.get("FOOTPASS_VIDEO_SYNC_JSON"),
+            }
+            try:
+                os.environ["FOOTPASS_VIDEOS_DIR"] = str(root / "missing-videos")
+                os.environ.pop("FOOTPASS_FULLHD_VIDEOS_DIR", None)
+                os.environ.pop("FOOTPASS_VIDEO_SYNC_JSON", None)
+                report = operations_report(root, expected_match_ids=("game_18",))
+                self.assertEqual(report["overlay_cache_key"], OVERLAY_CACHE_KEY)
+                self.assertFalse(report["sync_exists"])
+                self.assertTrue(any("FOOTPASS_VIDEO_SYNC_JSON missing" in item for item in report["warnings"]))
+                self.assertTrue(any("processing video missing" in item for item in report["warnings"]))
             finally:
                 for key, value in previous.items():
                     if value is None:
