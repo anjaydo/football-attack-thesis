@@ -24,11 +24,18 @@ def train_ball_model(
     device: str = "cpu",
     workers: int = 0,
     run_name: str = "soccernet-ball",
+    allow_cpu: bool = False,
 ) -> dict[str, object]:
     if not data_yaml.exists():
         raise FileNotFoundError(f"dataset YAML does not exist: {data_yaml}")
     if epochs <= 0 or image_size <= 0 or batch_size == 0 or workers < 0:
         raise ValueError("epochs, image_size and batch_size must be positive; workers >= 0")
+    cpu_like = str(device).strip().lower() in {"", "cpu"}
+    if cpu_like and image_size >= 1280 and epochs >= 20 and not allow_cpu:
+        raise RuntimeError(
+            "imgsz=1280 ball training needs a CUDA device (--device 0). "
+            "Pass --allow-cpu only for smoke tests. FOOTPASS+HDF5 xG does not wait on this gate."
+        )
     output_directory = output_directory.resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
     yolo = _load_yolo()(model)

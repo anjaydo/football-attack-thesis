@@ -27,6 +27,36 @@ Benchmark 50 frame `SNGS-033`, frame gốc 575-624, IoU 0.5:
 | YOLOv8s community football | 0.02 | 0.077 | 0.060 | 0.067 | Reject |
 | YOLOv9 community ball-only | 0.08 | 0.078 | 0.100 | 0.088 | Reject |
 
+Cùng 50 frame, RTX 4050, `imgsz 1280`, `ball-conf 0.01`, không khóa threshold
+(sweep `benchmark-ball`, chọn F1 cao nhất):
+
+| Path | Best conf | Precision | Recall | F1 | Keypoint coverage | Kết luận |
+|---|---:|---:|---:|---:|---:|---|
+| Full-frame, không pose-crop | 0.10 | 0.333 | 0.360 | 0.346 | 0.334 | Reject |
+| Tile 480 + pose-crop | 0.50 | 0.132 | 0.140 | 0.136 | 0.834 | Reject |
+
+Pose-crop đưa keypoint coverage từ 0.334 lên 0.834. Tile bóng tăng false
+positive (2874 box ở conf 0.01) nên F1 thấp hơn full-frame. Gate vẫn fail.
+Vì vậy `annotate-video`, `run-pipeline` và Streamlit mặc định `--ball-tile-size 0`
+(pose-crop vẫn bật); tile chỉ bật thủ công cùng model bóng fine-tune.
+JSON: `runs/sngs033-bench/baseline.ball-benchmark.json` và
+`tiled-pose.ball-benchmark.json`.
+
+Fine-tune `yolo26s.pt`, `imgsz 1280`, batch 4, 3.000 frame train / 750 frame val.
+Run đầu dừng ở epoch 31 (best epoch 14, val mAP50 0.373). Run nối tiếp từ
+weight đó dừng sớm ở epoch 22 (patience 17; best epoch 5, val mAP50 0.342).
+Sweep 50 frame, không khóa threshold:
+
+| Checkpoint | Path | Best conf | Precision | Recall | F1 | Kết luận |
+|---|---|---:|---:|---:|---:|---|
+| Nối tiếp, best val | Tile | 0.20 | 0.692 | 0.360 | 0.474 | Reject |
+| Nối tiếp, best val | Full-frame | 0.20 | 0.739 | 0.340 | 0.466 | Reject |
+| Run 1, best val mAP | Tile | 0.20 | 0.682 | 0.300 | 0.417 | Reject |
+| Run 1, best val mAP | Full-frame | 0.20 | 0.737 | 0.280 | 0.406 | Reject |
+
+F1 cao nhất 0.474, vẫn dưới 0.80. Precision full-frame 0.739 sát ngưỡng 0.75
+nhưng recall ~0.34. Checkpoint này không được nối vào possession, shot hay xG.
+
 Các checkpoint community bị domain shift. Model-card metric không được dùng làm
 metric luận văn. Report chi tiết nằm trong thư mục `derived` với hậu tố
 `ball-benchmark.json`.
@@ -76,9 +106,16 @@ cuối. Cấu hình khởi đầu trên NVIDIA GPU:
   --name soccernet-ball-1280
 ```
 
-Máy hiện tại không có CUDA. Smoke test CPU cho thấy một epoch `640` cần khoảng
-25-40 phút; `1280` nhiều epoch sẽ tốn nhiều giờ. Run smoke đã được dừng, không có
-checkpoint nửa chừng nào được coi là kết quả.
+Máy có RTX 4050 Laptop 6 GB và PyTorch `2.1.0+cu121` (`cuda=true` trên Python 3.11).
+Fine-tune `imgsz=1280` dùng `--device 0`. Batch 4 trên 6 GB có thể sát VRAM; hết bộ nhớ thì hạ `--batch`.
+Run smoke CPU trước đây đã dừng, không có checkpoint nửa chừng nào được coi là kết quả.
+
+`train-ball-model` **từ chối** `imgsz=1280` trên CPU khi `epochs >= 20`, trừ khi
+`--allow-cpu`. Fine-tune đạt gate chỉ chạy khi `doctor.tools.cuda_available=true`
+với `--device 0` như lệnh GPU ở trên.
+
+Path FOOTPASS + freeze HDF5 **không** chờ ball F1 0.80 (P9): xG location-only vẫn
+score. Gate bóng chỉ chặn suy possession/shot **video-only**.
 
 ## Inference và benchmark
 

@@ -36,7 +36,20 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(models[0].name, "yolo26s.pt")
         self.assertEqual(models[0].arguments["classes"], [0])
         self.assertEqual(models[0].arguments["single_cls"], True)
-        self.assertTrue(str(report["best_weights"]).endswith("weights\\best.pt"))
+        self.assertTrue(str(report["best_weights"]).endswith("weights\\best.pt") or str(report["best_weights"]).endswith("weights/best.pt"))
+
+    def test_refuses_cpu_imgsz_1280_full_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            data_yaml = Path(temporary_directory) / "data.yaml"
+            data_yaml.write_text("names:\n  0: ball\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "CUDA"):
+                train_ball_model(
+                    data_yaml,
+                    Path(temporary_directory) / "runs",
+                    epochs=100,
+                    image_size=1280,
+                    device="cpu",
+                )
 
     def test_requires_dataset_yaml(self) -> None:
         with self.assertRaises(FileNotFoundError):

@@ -28,6 +28,24 @@ def _bundled_ffmpeg_executable() -> str | None:
         return None
 
 
+def default_torch_device() -> str:
+    """Use GPU 0 when this interpreter's PyTorch was built with CUDA."""
+    try:
+        import torch
+    except ImportError:
+        return "cpu"
+    if torch.cuda.is_available():
+        return "0"
+    return "cpu"
+
+
+def default_inference_imgsz() -> int:
+    """1080p broadcast balls are ~12px. 1280 on the RTX 4050 upscales them; CPU stays at 960."""
+    if default_torch_device() == "0":
+        return 1280
+    return 960
+
+
 def environment_report() -> dict[str, object]:
     packages = {
         "numpy": _package_version("numpy"),
@@ -55,8 +73,19 @@ def environment_report() -> dict[str, object]:
         recommendations.append('install core: python -m pip install -e .')
     if not vision_ready:
         recommendations.append('install vision: python -m pip install -e ".[vision]"')
-    if vision_ready and not cuda_available:
+    if vision_ready and cuda_available:
+        recommendations.append(
+            "CUDA is available; annotate-video, run-pipeline and train-ball-model "
+            "use --device 0 unless you pass --device cpu. Ball tiles are off by default; "
+            "--ball-tile-size runs them at batch 2 so a 6GB laptop GPU can keep the "
+            "player, pose and ball models loaded."
+        )
+    elif vision_ready and not cuda_available:
         recommendations.append("use --device cpu and --max-frames 300 for the first run")
+        recommendations.append(
+            "ball F1 0.35 vs gate 0.80: train-ball-model --imgsz 1280 needs NVIDIA GPU "
+            "(--device 0). FOOTPASS+HDF5 xG does not wait on this gate"
+        )
     if shutil.which("ffmpeg") is None and _package_version("imageio-ffmpeg") is None:
         recommendations.append(
             'install browser H.264 support: python -m pip install "imageio-ffmpeg>=0.5"'

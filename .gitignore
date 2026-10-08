@@ -30,6 +30,7 @@ logs/
 
 # Runtime and local datasets
 data/
+datasets/
 runs/
 
 # Large model weights and trained artifacts (keep small JSON configs)
