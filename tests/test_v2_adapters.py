@@ -35,6 +35,32 @@ class V2AdapterTests(unittest.TestCase):
         self.assertFalse(decoded.attacks)
         self.assertEqual(decoded.possessions[0].status.value, "uncertain")
 
+    def test_upload_flow_promotes_shot_candidate_into_a_selectable_attack(self) -> None:
+        from attack_analysis.v2_adapters import sequences_from_video_events
+
+        _actions, decoded = sequences_from_video_events(
+            (
+                Event(0.0, "possession_start", "team_a", x=40.0, y=34.0, frame=0),
+                Event(1.0, "carry", "team_a", x=60.0, y=34.0, frame=25),
+                Event(
+                    2.0,
+                    "shot_candidate",
+                    "team_a",
+                    x=88.0,
+                    y=34.0,
+                    frame=50,
+                    outcome="unverified",
+                ),
+            ),
+            match_id="upload-clip",
+        )
+        self.assertEqual(len(decoded.attacks), 1)
+        attack = decoded.attacks[0]
+        self.assertEqual(attack.terminal.terminal_type.value, "shot_attempt")
+        self.assertEqual(attack.possession.actions[-1].action_type, "shot")
+        self.assertEqual(attack.possession.actions[-1].outcome, "unverified")
+        self.assertEqual(attack.possession.source_tier, SourceTier.VIDEO_ONLY)
+
     def test_explicit_shot_can_terminate_complete_possession(self) -> None:
         _, decoded = decode_event_stream_v2(
             (

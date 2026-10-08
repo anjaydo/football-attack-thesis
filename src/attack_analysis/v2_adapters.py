@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Iterable, Literal, Mapping
 
 from .attack_v2 import AttackV2DecodeResult, FootpassAttackV2Config, decode_footpass_attack_v2
@@ -142,6 +143,36 @@ def event_stream_to_observed_actions_v2(
     )
 
 
+def sequences_from_video_events(
+    events: Iterable[Event],
+    *,
+    match_id: str,
+    period: int = 1,
+    fps: float = 25.0,
+    scene_cut_frames: Iterable[int] = (),
+) -> tuple[tuple[ObservedActionV2, ...], AttackV2DecodeResult]:
+    """Turn an uploaded clip's event list into possessions and attacks.
+
+    ``shot_candidate`` is trajectory evidence. For this exploratory path it is
+    decoded as a shot so a fast ball into the box can be selected as an attack.
+    The resulting attack stays ``video_only`` and is not a FOOTPASS label.
+    """
+
+    prepared = tuple(
+        replace(event, event_type="shot") if event.event_type == "shot_candidate" else event
+        for event in events
+    )
+    return decode_event_stream_v2(
+        prepared,
+        match_id=match_id,
+        period=period,
+        fps=fps,
+        source_tier=SourceTier.VIDEO_ONLY,
+        replay_status="live",
+        scene_cut_frames=scene_cut_frames,
+    )
+
+
 def decode_event_stream_v2(
     events: Iterable[Event],
     *,
@@ -177,4 +208,5 @@ __all__ = [
     "decode_event_stream_v2",
     "event_stream_to_observed_actions_v2",
     "event_to_observed_action_v2",
+    "sequences_from_video_events",
 ]

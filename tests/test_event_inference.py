@@ -30,6 +30,29 @@ def tracked_object(
     return result
 
 
+def _video_frame(
+    index: int,
+    owner_id: str | None,
+    team: str | None,
+    ball_x: float,
+    timestamp: float | None = None,
+) -> FrameObservation:
+    objects: list[dict[str, object]] = [tracked_object("ball-1", "ball", ball_x, 34)]
+    if owner_id is not None and team is not None:
+        objects.insert(0, tracked_object(owner_id, "player", ball_x + 0.4, 34, team))
+    return FrameObservation.from_dict(
+        {
+            "frame_index": index,
+            "timestamp_sec": index / 25.0 if timestamp is None else timestamp,
+            "objects": objects,
+        }
+    )
+
+
+def _video_touch(indexes: range, owner_id: str, team: str, ball_x: float) -> list[FrameObservation]:
+    return [_video_frame(index, owner_id, team, ball_x) for index in indexes]
+
+
 def frame(
     index: int,
     owner_id: str,
@@ -108,18 +131,18 @@ class EventInferenceTests(unittest.TestCase):
         )
 
     def test_rejects_physically_impossible_transfer(self) -> None:
-        events = infer_events_from_observations(
-            [
-                frame(0, "a1", "team_a", 5),
-                FrameObservation.from_dict(
-                    {
-                        **frame(1, "a2", "team_a", 100).to_dict(),
-                        "timestamp_sec": 0.1,
-                    }
-                ),
-            ]
-        )
-        self.assertNotIn("pass", [event.event_type for event in events])
+        with self.assertRaises(ValueError):
+            infer_events_from_observations(
+                [
+                    frame(0, "a1", "team_a", 5),
+                    FrameObservation.from_dict(
+                        {
+                            **frame(1, "a2", "team_a", 100).to_dict(),
+                            "timestamp_sec": 0.1,
+                        }
+                    ),
+                ]
+            )
 
     def test_forward_ball_trajectory_stays_unverified_and_has_no_xg(self) -> None:
         owner_frame = frame(0, "a1", "team_a", 80)
@@ -127,15 +150,15 @@ class EventInferenceTests(unittest.TestCase):
             FrameObservation.from_dict(
                 {
                     "frame_index": 1,
-                    "timestamp_sec": 0.5,
-                    "objects": [tracked_object("ball-1", "ball", 90, 34)],
+                    "timestamp_sec": 0.4,
+                    "objects": [tracked_object("ball-1", "ball", 92, 10)],
                 }
             ),
             FrameObservation.from_dict(
                 {
                     "frame_index": 2,
-                    "timestamp_sec": 1.0,
-                    "objects": [tracked_object("ball-1", "ball", 104, 34)],
+                    "timestamp_sec": 0.8,
+                    "objects": [tracked_object("ball-1", "ball", 104, 10)],
                 }
             ),
         ]
@@ -145,6 +168,38 @@ class EventInferenceTests(unittest.TestCase):
         self.assertIsNone(candidates[0].xg)
         self.assertIsNone(candidates[0].xg_source)
         self.assertEqual(candidates[0].outcome, "unverified")
+
+    def test_video_rate_teleport_does_not_become_a_shot(self) -> None:
+        frames = [
+            *_video_touch(range(8), "a1", "team_a", 82.0),
+            _video_frame(8, None, None, 104.0),
+        ]
+        events = infer_events_from_observations(frames)
+        self.assertNotIn("shot_candidate", [event.event_type for event in events])
+
+    def test_video_rate_owner_flicker_is_not_a_turnover(self) -> None:
+        frames = [
+            *_video_touch(range(8), "a1", "team_a", 40.0),
+            _video_frame(8, "b1", "team_b", 40.2),
+            *_video_touch(range(9, 17), "a1", "team_a", 41.0),
+        ]
+        events = infer_events_from_observations(frames)
+        self.assertNotIn("turnover", [event.event_type for event in events])
+        self.assertNotIn("pass", [event.event_type for event in events])
+        self.assertTrue(all(event.team == "team_a" for event in events))
+
+    def test_video_rate_ball_reaching_the_goal_is_a_shot_candidate(self) -> None:
+        frames = [
+            *_video_touch(range(6), "a1", "team_a", 80.0),
+            _video_frame(6, None, None, 86.0, timestamp=0.45),
+            _video_frame(7, None, None, 94.0, timestamp=0.75),
+            _video_frame(8, None, None, 102.0, timestamp=1.05),
+            _video_frame(9, None, None, 104.0, timestamp=1.30),
+        ]
+        events = infer_events_from_observations(frames)
+        candidates = [event for event in events if event.event_type == "shot_candidate"]
+        self.assertEqual(len(candidates), 1)
+        self.assertGreaterEqual(candidates[0].end_x or 0, 96.0)
 
     def test_trained_xg_receives_calibrated_video_context(self) -> None:
         class FakeModel:
