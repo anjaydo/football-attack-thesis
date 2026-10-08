@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 
 from attack_analysis.models import AttackSequence, Event, ObservedActionV2, SourceTier
-from attack_analysis.pitch_visualization import plot_attack_pitch, plot_pitch_events
+from attack_analysis.pitch_visualization import (
+    aligned_event_xy,
+    pitch_event_views,
+    plot_attack_pitch,
+    plot_pitch_events,
+)
 
 
 class PitchVisualizationTests(unittest.TestCase):
@@ -202,6 +207,34 @@ class PitchVisualizationTests(unittest.TestCase):
             self.assertGreaterEqual(len(figure.axes), 2)
         finally:
             figure.clear()
+
+
+    def test_short_gap_on_the_opposite_half_is_reflected_for_display(self) -> None:
+        events = (
+            Event(106.84, "drive", "game_18:roster-200", x=90.9, y=38.5, jersey=9),
+            Event(107.64, "shot", "game_18:roster-200", x=92.1, y=37.0, jersey=9),
+            Event(107.76, "block", "game_18:roster-200", x=9.9, y=36.3, jersey=13),
+        )
+        aligned = aligned_event_xy(events)
+        self.assertFalse(aligned[0][2])
+        self.assertFalse(aligned[1][2])
+        self.assertTrue(aligned[2][2])
+        self.assertAlmostEqual(aligned[2][0], 105.0 - 9.9)
+        self.assertAlmostEqual(aligned[2][1], 36.3)
+        views = pitch_event_views(events, attack_relative=False)
+        self.assertAlmostEqual(views[2].x, 95.1)
+        self.assertTrue(views[2].mirrored_to_same_side)
+        self.assertIn("cùng mặt sân", views[2].annotation)
+
+    def test_a_pass_across_the_pitch_is_not_reflected(self) -> None:
+        events = (
+            Event(10.0, "pass", "1", x=30.0, y=34.0),
+            Event(11.2, "drive", "1", x=71.0, y=40.0),
+        )
+        aligned = aligned_event_xy(events)
+        self.assertFalse(aligned[0][2])
+        self.assertFalse(aligned[1][2])
+        self.assertAlmostEqual(aligned[1][0], 71.0)
 
 
 if __name__ == "__main__":

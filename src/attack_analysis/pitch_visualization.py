@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from matplotlib.lines import Line2D
@@ -87,6 +87,7 @@ class PitchEventView:
     end_x: float | None = None
     end_y: float | None = None
     opponent: bool = False
+    mirrored_to_same_side: bool = False
 
 
 def _action_label(action_type: str) -> str:
@@ -243,6 +244,145 @@ def _view_from_action(index: int, action: ObservedActionV2) -> PitchEventView | 
     )
 
 
+_SHORT_EVENT_GAP_SEC = 1.5
+_SAME_SIDE_NEAR_M = 12.0
+_SAME_SIDE_FAR_M = 40.0
+_KEEP_ON_SIDE = frozenset(
+    {"shot", "shot_attempt", "drive", "carry", "pass", "cross", "header", "headed_attempt"}
+)
+_DEFENSIVE_TOUCH = frozenset({"block", "tackle"})
+
+
+def _event_time(item: Event | ObservedActionV2) -> float:
+    if isinstance(item, ObservedActionV2):
+        return float(item.timestamp_sec)
+    return float(item.timestamp)
+
+
+def _event_action(item: Event | ObservedActionV2) -> str:
+    if isinstance(item, ObservedActionV2):
+        return item.action_type
+    return item.event_type
+
+
+def _side_priority(action_type: str) -> int:
+    if action_type in _DEFENSIVE_TOUCH:
+        return 0
+    if action_type in _KEEP_ON_SIDE:
+        return 3
+    return 1
+
+
+def aligned_event_xy(
+    items: Sequence[Event | ObservedActionV2],
+) -> tuple[tuple[float | None, float | None, bool], ...]:
+    """Reflect impossible short-gap jumps onto the same pitch side.
+
+    Events a fraction of a second apart cannot be 80 m apart. When a point is
+    that far from a neighbour but ``105 - x`` lands beside it, the point is on
+    the mirrored half and is reflected for display. A real long pass is left
+    unchanged because its mirror does not land next to the previous event.
+    """
+
+    located = [
+        index
+        for index, item in enumerate(items)
+        if item.x is not None and item.y is not None
+    ]
+    flips = {index: False for index in located}
+    parent = {index: index for index in located}
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for left_pos, left in enumerate(located):
+        for right in located[left_pos + 1 :]:
+            gap = abs(_event_time(items[left]) - _event_time(items[right]))
+            if gap > _SHORT_EVENT_GAP_SEC:
+                continue
+            distance = math.hypot(
+                float(items[left].x) - float(items[right].x),
+                float(items[left].y) - float(items[right].y),
+            )
+            if distance <= _SAME_SIDE_NEAR_M:
+                union(left, right)
+
+    clusters: dict[int, list[int]] = {}
+    for index in located:
+        clusters.setdefault(find(index), []).append(index)
+    if len(clusters) < 2:
+        return tuple(
+            (None, None, False)
+            if item.x is None or item.y is None
+            else (float(item.x), float(item.y), False)
+            for item in items
+        )
+
+    def cluster_rank(members: Sequence[int]) -> tuple[int, int, float]:
+        priority = sum(_side_priority(_event_action(items[index])) for index in members)
+        mean_time = sum(_event_time(items[index]) for index in members) / len(members)
+        return priority, len(members), -mean_time
+
+    reference = max(clusters, key=lambda root: cluster_rank(clusters[root]))
+    reference_members = clusters[reference]
+
+    def closest_pair(members: Sequence[int]) -> tuple[float, float, float] | None:
+        found: tuple[float, float, float] | None = None
+        for other in members:
+            raw_x = float(items[other].x)
+            mirrored_x = PITCH_LENGTH - raw_x
+            for origin in reference_members:
+                gap = abs(_event_time(items[origin]) - _event_time(items[other]))
+                if gap > _SHORT_EVENT_GAP_SEC:
+                    continue
+                if found is not None and gap >= found[0]:
+                    continue
+                raw_distance = math.hypot(
+                    float(items[origin].x) - raw_x,
+                    float(items[origin].y) - float(items[other].y),
+                )
+                mirrored_distance = math.hypot(
+                    float(items[origin].x) - mirrored_x,
+                    float(items[origin].y) - float(items[other].y),
+                )
+                found = (gap, raw_distance, mirrored_distance)
+        return found
+
+    for root, members in clusters.items():
+        if root == reference:
+            continue
+        pair = closest_pair(members)
+        if pair is None:
+            continue
+        gap, raw_distance, mirrored_distance = pair
+        speed = raw_distance / max(gap, 0.05)
+        if (
+            raw_distance > _SAME_SIDE_FAR_M
+            and mirrored_distance <= _SAME_SIDE_NEAR_M
+            and speed > 40.0
+        ):
+            for index in members:
+                flips[index] = True
+
+    aligned: list[tuple[float | None, float | None, bool]] = []
+    for index, item in enumerate(items):
+        if item.x is None or item.y is None:
+            aligned.append((None, None, False))
+            continue
+        flipped = flips[index]
+        x = PITCH_LENGTH - float(item.x) if flipped else float(item.x)
+        aligned.append((x, float(item.y), flipped))
+    return tuple(aligned)
+
+
 def pitch_event_views(
     items: Sequence[Event | ObservedActionV2],
     *,
@@ -256,17 +396,30 @@ def pitch_event_views(
         prepared = [next(iterator) if isinstance(item, ObservedActionV2) else item for item in items]
     else:
         prepared = list(items)
+    aligned = aligned_event_xy(prepared)
     views: list[PitchEventView] = []
-    for item in prepared:
+    for item, (x, y, mirrored) in zip(prepared, aligned, strict=True):
+        if x is None or y is None:
+            continue
+        shown = replace(item, x=x, y=y)
+        if mirrored and shown.end_x is not None:
+            shown = replace(shown, end_x=PITCH_LENGTH - float(shown.end_x))
         index = len(views) + 1
-        if isinstance(item, ObservedActionV2):
-            view = _view_from_action(index, item)
-        elif isinstance(item, Event):
-            view = _view_from_event(index, item)
+        if isinstance(shown, ObservedActionV2):
+            view = _view_from_action(index, shown)
+        elif isinstance(shown, Event):
+            view = _view_from_event(index, shown)
         else:
-            raise TypeError(f"unsupported pitch event type: {type(item)!r}")
-        if view is not None:
-            views.append(view)
+            raise TypeError(f"unsupported pitch event type: {type(shown)!r}")
+        if view is None:
+            continue
+        if mirrored:
+            view = replace(
+                view,
+                annotation=view.annotation + "\nđã phản chiếu về cùng mặt sân với event liền kề",
+                mirrored_to_same_side=True,
+            )
+        views.append(view)
     return tuple(views)
 
 
