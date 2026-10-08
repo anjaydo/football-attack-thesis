@@ -150,6 +150,8 @@ Lệnh cũ `attack-analysis file.json` vẫn được hỗ trợ và tương đ�
 Tài liệu:
 
 - `demo.md`: kịch bản demo 8–10 phút, số liệu kỳ vọng và phương án dự phòng;
+- `docs/reference/README.md`: **tài liệu tham chiếu toàn diện** viết từ mã nguồn
+  (kiến trúc, từng module, toàn bộ 51 lệnh CLI, Streamlit, dữ liệu/schema, test, lỗi đã biết);
 - `docs/external-calibration-data.md`: nguồn dữ liệu calibration/tracking bổ sung,
   license, provenance và thứ tự tích hợp;
 - `docs/possession-qualification.md`: rubric tách possession thông thường khỏi
@@ -160,6 +162,9 @@ Tài liệu:
 - `docs/vision-pipeline.md`: kiến trúc YOLO, speed và giới hạn của video broadcast.
 - `docs/implementation-status.md`: ma trận chức năng, mức kiểm thử và phần còn thiếu.
 - `docs/attack-v2.md`: ontology, contracts, source tiers, gold split, evaluator và runbook v2.
+- `docs/gold-annotation-runbook.md`: thứ tự gán nhãn 12 trận (P11, development trước).
+- `docs/footpass-rented-gpu-train.md`: train TAAD+DST đủ 48 trận trên GPU thuê (không Colab).
+- `docs/ops-checklist.md`: sync JSON, Full HD overlay, FFmpeg, calib FAIL.
 - `docs/yolo-field-preview-analysis.md`: phép thử YOLO + field geometry trên SoccerNet.
 - `docs/ball-accuracy-plan.md`: benchmark, dataset, lệnh train GPU và quality gate cho bóng.
 - `docs/research-pipeline.md`: luồng FOOTPASS oracle/predicted, annotation, ML, LLM tools và demo.

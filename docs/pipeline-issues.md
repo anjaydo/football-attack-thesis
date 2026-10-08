@@ -115,11 +115,11 @@ Jersey crop + cluster 2 nhóm, tối thiểu 4 track. Cắt cảnh reset cluster
 
 ### 4.5 Bóng
 
-Ball ByteTrack, F1 historically ~0.35 vs gate 0.80. `score_attack_with_observations` **không withhold xG** nếu đã có `x_shooter`/`y_shooter` (location-only + missingness) hoặc freeze-frame HDF5. Ball F1 thấp còn là **cảnh báo** (`ball_quality_warning`), không chặn model.
+Ball ByteTrack, F1 COCO ~0.35, fine-tune tốt nhất 0.474, gate 0.80. Tile bóng 480 với model COCO tạo nhiều false positive (F1 0.136) nên mặc định đã tắt; chỉ bật `--ball-tile-size` khi dùng `--ball-model` fine-tune. `score_attack_with_observations` **không withhold xG** nếu đã có `x_shooter`/`y_shooter` (location-only + missingness) hoặc freeze-frame HDF5. Ball F1 thấp còn là **cảnh báo** (`ball_quality_warning`), không chặn model.
 
 ### 4.6 Overlay xuất review
 
-Từng chạy YOLO trên video **chất lượng thấp** trong khi preview Full HD. Đã chuyển overlay sang `FOOTPASS_FULLHD_VIDEOS_DIR`. Cache invalidate theo `overlay=fullhd_pose_gk_v4_video_only` + `footpass-video-sync.json`.
+Từng chạy YOLO trên video **chất lượng thấp** trong khi preview Full HD. Đã chuyển overlay sang `FOOTPASS_FULLHD_VIDEOS_DIR`. Cache invalidate theo `overlay=fullhd_pose_crop_ball_fullframe_v6` + `footpass-video-sync.json`.
 
 OpenCV `VideoWriter` H.264 trên Windows (OpenH264) từng fail; overlay trình duyệt cần FFmpeg/`imageio-ffmpeg` (mp4v → JPEG frames).
 
@@ -169,8 +169,11 @@ OpenCV `VideoWriter` H.264 trên Windows (OpenH264) từng fail; overlay trình 
 | P8 | Spatial context thiếu dù event + skeleton có | **Đã đóng phần fusion + UI**: freeze HDF5, provenance, pitch mini, trail, YOLO track, pose trên sân + inset, buildup vào LLM |
 | P9 | Ball F1 < 0.80 withhold xG | **Đóng**: không withhold khi có vị trí sút hoặc freeze; cảnh báo F1; location-only + missingness masks |
 | P10 | Team YOLO ≠ FOOTPASS team | Vote track gần actor **và** NN-align freeze side/role |
-| P11 | xG research_only / chưa GT 12 trận | **Còn** (ràng buộc nghiên cứu — không đóng bằng code) |
+| P11 | xG research_only / chưa GT 12 trận | **Còn** — chạy `gold-status`; runbook [docs/gold-annotation-runbook.md](gold-annotation-runbook.md). Không đóng bằng code |
 | P12 | Video-only calibration | **Baseline nghiên cứu**: grass-polygon homography khi oracle vắng; không phải oracle-quality |
+| P13 | Tile bóng mặc định làm overlay tệ hơn | **Đóng**: `ball_tile_size` mặc định 0, cache overlay `..._v6` |
+| P14 | `footpass-video-sync.json` chỉ có `game_18` | **Còn**: 8 trận còn lại dùng offset 0 s / 25 fps mặc định. Cần đo offset thật (không đoán) trước khi tin overlay ngoài `game_18` |
+| P15 | Attack start F1 thấp với DST (0.386) | **Chẩn đoán**: 26/46 attack oracle khớp terminal ±1 s; trong đó start lệch median −0.12 s. Nguyên nhân chính là DST bỏ lỡ terminal (20/46), không phải logic start của decoder. Không chỉnh decoder trên val |
 
 ---
 
@@ -203,8 +206,10 @@ Hiện đạt (1)–(6) khi có tactical HDF5. Thiếu HDF5: location-only xG + 
 8. Video-only homography từ pitch polygon; extrapolation 25 frame.
 9. Heuristic corner / FK / penalty + provenance `geometry_heuristic`.
 
-**Không đóng bằng engineering:** P11 (cần human GT trên 12 trận). P12 không pretends oracle. Heuristic play_pattern không thay nhãn StatsBomb.
+**Không đóng bằng engineering:** P11 (cần human GT trên 12 trận rồi human-domain xG). P12 không pretends oracle. Heuristic play_pattern không thay nhãn StatsBomb.
+
+Vận hành (calib 0%, overlay cũ, mp4 trình duyệt): [docs/ops-checklist.md](ops-checklist.md) — `doctor` / `inspect-video-sync`.
 
 ---
 
-*Cập nhật: fusion attack-view thống nhất, location-only xG, video-only polygon homography, YOLO↔freeze role align, play_pattern heuristic, calib UX. P11 còn mở.*
+*Cập nhật: fusion attack-view thống nhất, location-only xG, video-only polygon homography, YOLO↔freeze role align, play_pattern heuristic, calib UX. P11 còn mở; gold-status + ops checklist.*

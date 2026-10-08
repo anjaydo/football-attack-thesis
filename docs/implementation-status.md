@@ -30,7 +30,7 @@ oracle-assisted hiện tại chỉ là audit hạ tầng, không phải accuracy
 | JSON schema/validation | Hoàn thành | Unit + integration | Runner output đọc lại được bằng schema |
 | Video metadata | Hoàn thành | Unit + real video | Đã đọc clip SoccerNet 1920x1080 |
 | Player detection + skeleton | Hoàn thành baseline | Integration + real video | Detect người rồi ghép pose theo IoU |
-| Ball detection | Chưa đạt quality gate | Integration + real video | F1 0.348, gate yêu cầu 0.80; đã có exporter/trainer/benchmark |
+| Ball detection | Chưa đạt quality gate | Integration + real video | COCO full-frame F1 0.346; fine-tune `yolo26s` 1280 tốt nhất 0.474 (P 0.69, R 0.36); gate 0.80. Tile bóng tắt mặc định (`--ball-tile-size 0`) vì tile 480 với model COCO hạ F1 xuống 0.136 |
 | Ball accuracy gate | Hoàn thành | Unit + real data | Quét threshold, yêu cầu F1 0.80 và P/R 0.75 |
 | Player/ball tracking ID | Hoàn thành baseline | Integration + real video | Player tracking tốt ở preview; ball tracking chưa đạt |
 | Pitch ROI | Hoàn thành baseline | Unit + real video | ROI tĩnh hoặc grass contour tự động |
@@ -41,7 +41,7 @@ oracle-assisted hiện tại chỉ là audit hạ tầng, không phải accuracy
 | Static homography | Hoàn thành | Unit | Cho camera cố định |
 | Speed `km/h` | Hoàn thành code | Unit | Chỉ đúng khi calibration đúng |
 | FOOTPASS-assisted dynamic calibration | Hoàn thành | Unit + real video | Per-frame ROI↔tactical homography, holdout median/P90 gate |
-| Video-only dynamic calibration | Chưa có | Chưa test | Cần semantic pitch landmarks/checkpoint SoccerNet calibration |
+| Video-only dynamic calibration | Baseline nghiên cứu | Unit | Grass-polygon homography (`projector_from_pitch_polygon`), confidence 0.25, sideline y có thể lật. **Không** phải semantic landmarks / checkpoint SoccerNet |
 | Observation quality report | Hoàn thành | Unit + CLI | Pass/warn/fail và warning codes |
 | Possession inference | Deterministic v2 baseline | Unit | Contested touch không đổi owner; learned model chưa train |
 | Carry/pass/turnover | Hoàn thành baseline | Unit + CLI | Có physical transfer gate |
@@ -49,6 +49,7 @@ oracle-assisted hiện tại chỉ là audit hạ tầng, không phải accuracy
 | Geometry-only xG | Legacy ablation | Unit | Không được gắn vào Attack-v2 output |
 | xG-v2 | Hạ tầng + Streamlit fusion | Unit + StatsBomb; research_only UI | `models/xg-v2.joblib` local (gitignored); chưa human-domain validation |
 | Attack-v2 decoder | Hoàn thành deterministic baseline | Unit + real FOOTPASS audit | Strict terminal; chưa human-GT accuracy |
+| Prediction-source registry | Hoàn thành | Unit + real FOOTPASS val | `DST_v1` vẫn primary (micro-F1 0.719) nhưng file gốc đã bị ghi đè. `DST_h100` ablation (0.688). Xem [prediction-sources.md](prediction-sources.md) |
 | TCN/semi-Markov | Hạ tầng hoàn thành | Unit + Torch smoke | `infrastructure_untrained` |
 | Effectiveness scoring | Legacy bị khóa | Unit | Không categorical verdict trước ≥300 confirmed labels + gates |
 | Sequence evaluation | Hoàn thành | Unit | Hungarian, tIoU .25/.5/.75, 2k match bootstrap |
@@ -96,17 +97,20 @@ Milestone được coi là đạt trên một clip thật khi:
 
 Kết quả `doctor` trên máy hiện tại:
 
-- Python 3.14.3, OpenCV 5.0.0, Torch 2.13.0 CPU và Ultralytics 8.4.126;
-- `vision_ready=true` trong runtime thử nghiệm;
-- không phát hiện CUDA/NVIDIA GPU;
-- FFmpeg chưa cài;
+- Interpreter có CUDA: Python 3.11, Torch 2.1.0+cu121, Ultralytics 8.4.126;
+- GPU: NVIDIA GeForce RTX 4050 Laptop, 6 GB, driver 581.86, `torch.cuda.is_available()=true`;
+- `train-ball-model --imgsz 1280` chạy với `--device 0`. `--allow-cpu` chỉ dành cho smoke test khi không có CUDA;
+- FFmpeg: chạy `doctor` / `inspect-video-sync`; xem [ops-checklist.md](ops-checklist.md);
 - SoccerNet GSR sequence `SNGS-033` đã được ghép thành clip preview và chạy YOLO.
+- P11: `gold-status` — chưa có JSONL development/train trong `data/`.
 
 Preview detect+pose có 632 player detections/50 frame, 22 player track, player
 tracking coverage 100% và keypoint coverage 36.21%. Ground-truth person F1 là
 0.721. Geometry có ở 100% frame. Sau khi tăng ball threshold và không dùng grass
 ROI cho bóng bay cao, ball F1 tăng từ 0.13 lên 0.348 nhưng vẫn chưa đủ chất lượng
 để suy luận possession/shot/xG. Chi tiết ở `docs/yolo-field-preview-analysis.md`.
+Fine-tune trên `data/yolo-ball-v2` nâng F1 lên 0.474, vẫn reject; bảng đầy đủ ở
+[ball-accuracy-plan.md](ball-accuracy-plan.md).
 
 Ba checkpoint chuyên bóng công khai cũng đã được kiểm tra trên cùng 50 frame.
 F1 tốt nhất tương ứng là 0.342, 0.067 và 0.088, cho thấy domain shift rõ ràng.
