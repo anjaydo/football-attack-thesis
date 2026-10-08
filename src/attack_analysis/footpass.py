@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from math import hypot, isfinite
 from pathlib import Path
 import re
@@ -188,13 +189,20 @@ def footpass_match_keys(path: Path) -> tuple[str, ...]:
 
 
 def _load_tactical_rows(path: Path, match_key: str) -> Any:
+    resolved = Path(path).resolve()
+    return _cached_tactical_rows(str(resolved), match_key, resolved.stat().st_mtime_ns)
+
+
+@lru_cache(maxsize=2)
+def _cached_tactical_rows(path_str: str, match_key: str, mtime_ns: int) -> Any:
+    del mtime_ns  # Included so a rewritten HDF5 is not served from cache.
     try:
         import h5py
     except ImportError as error:  # pragma: no cover - optional dependency
         raise RuntimeError("Install the 'footpass' extra to read tactical HDF5 data") from error
-    with h5py.File(path, "r") as handle:
+    with h5py.File(path_str, "r") as handle:
         if match_key not in handle:
-            raise KeyError(f"{match_key} is not present in {path}")
+            raise KeyError(f"{match_key} is not present in {path_str}")
         return handle[match_key][:]
 
 
