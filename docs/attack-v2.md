@@ -104,6 +104,7 @@ Intra-rater comparison uses temporal one-to-one matching so legitimate boundary
 differences do not destroy pairing.
 
 ```powershell
+attack-analysis gold-status
 attack-analysis build-gold-manifest "G:\My Drive\footpass-videos" data\attack-v2-gold-manifest.json
 attack-analysis validate-gold-annotations data\labels\attack-v2-development.jsonl `
   --period-intervals data\labels\development-periods.json
@@ -115,6 +116,11 @@ attack-analysis build-gold-manifest "G:\My Drive\footpass-videos" `
   data\attack-v2-gold-manifest-sealed.json `
   --sealed-directory data\labels\sealed-test
 ```
+
+Start on development games 18/24/47. Do not open frozen test to tune. Full order:
+[gold-annotation-runbook.md](gold-annotation-runbook.md). `gold-status` never reads
+test labels. P11 stays `open` until labels exist **and** xG is human-domain validated.
+
 
 The period declaration file contains `schema_version`, `rubric_version`,
 `frame_interval_convention: "inclusive"`, and a `period_intervals` array. Each

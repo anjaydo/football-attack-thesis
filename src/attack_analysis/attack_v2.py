@@ -31,6 +31,7 @@ class FootpassAttackV2Config:
     """
 
     max_observation_gap_sec: float = 8.0
+    rebound_window_sec: float = 3.0
     event_cluster_sec: float = 0.50
     fps: float = 25.0
     rubric_version: str = ATTACK_V2_RUBRIC_VERSION
@@ -47,6 +48,8 @@ class FootpassAttackV2Config:
     def __post_init__(self) -> None:
         if self.max_observation_gap_sec <= 0:
             raise ValueError("max_observation_gap_sec must be positive")
+        if self.rebound_window_sec < 0:
+            raise ValueError("rebound_window_sec must be non-negative")
         if self.event_cluster_sec < 0:
             raise ValueError("event_cluster_sec must be non-negative")
         if self.fps <= 0:
@@ -460,6 +463,57 @@ def qualify_attack_v2(
     )
 
 
+def _same_team_rebound_follows(
+    clusters: tuple[tuple[ObservedActionV2, ...], ...],
+    index: int,
+    candidate: _TerminalCandidate,
+    settings: FootpassAttackV2Config,
+) -> bool:
+    """Keep a blocked shot open when the same team shoots again immediately.
+
+    A đá bồi is the same attacking move: shot, block, then the same team
+    controls or shoots again before the opponent restarts or takes control.
+    """
+
+    if settings.rebound_window_sec <= 0:
+        return False
+    if candidate.terminal_type not in {TerminalType.SHOT_ATTEMPT, TerminalType.HEADED_ATTEMPT}:
+        return False
+    shot = candidate.action
+    team = candidate.possession_team_id
+    previous_end = clusters[index][-1]
+    for later in clusters[index + 1 :]:
+        first = later[0]
+        if first.match_id != shot.match_id or first.period != shot.period:
+            return False
+        if first.timestamp_sec - shot.timestamp_sec > settings.rebound_window_sec:
+            return False
+        if first.timestamp_sec - previous_end.timestamp_sec > settings.max_observation_gap_sec:
+            return False
+        for item in later:
+            if item.action_type in settings.restart_action_types:
+                return False
+            opponent_control = (
+                item.action_type in settings.controlled_action_types
+                and item.actor_team_id not in {None, team}
+            )
+            if opponent_control:
+                return False
+            later_candidate = _terminal_candidate(item)
+            same_team_shot = (
+                later_candidate is not None
+                and later_candidate.possession_team_id == team
+                and later_candidate.terminal_type
+                in {TerminalType.SHOT_ATTEMPT, TerminalType.HEADED_ATTEMPT}
+            )
+            if item.actor_team_id == team and (
+                item.action_type in settings.controlled_action_types or same_team_shot
+            ):
+                return True
+        previous_end = later[-1]
+    return False
+
+
 def decode_footpass_attack_v2(
     actions: Iterable[ObservedActionV2],
     config: FootpassAttackV2Config | None = None,
@@ -516,7 +570,8 @@ def decode_footpass_attack_v2(
             attacks.append(attack)
         current = None
 
-    for cluster in _cluster_actions(tuple(live_actions), settings):
+    clusters = _cluster_actions(tuple(live_actions), settings)
+    for cluster_index, cluster in enumerate(clusters):
         first = cluster[0]
         last = cluster[-1]
 
@@ -596,6 +651,10 @@ def decode_footpass_attack_v2(
             # the terminal's stable observed action ID remains unchanged.
             if terminal.possession_team_id != current.team_id:
                 raise RuntimeError("terminal team and possession decoder state diverged")
+            if _same_team_rebound_follows(clusters, cluster_index, terminal_candidate, settings):
+                next_initial_status = SequenceStatus.COMPLETE
+                previous_cluster_end = last
+                continue
             emit(SequenceStatus.COMPLETE, terminal)
             next_initial_status = SequenceStatus.COMPLETE
             previous_cluster_end = last

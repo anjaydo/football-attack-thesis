@@ -297,7 +297,7 @@ class FootpassAttackV2DecoderTests(unittest.TestCase):
         self.assertEqual(len(result.attacks[0].possession.actions), 3)
         self.assertEqual(result.attacks[0].terminal.terminal_type, TerminalType.SHOT_ATTEMPT)
 
-    def test_controlled_rebound_after_shot_opens_a_new_attack(self) -> None:
+    def test_controlled_rebound_stays_in_the_same_attack(self) -> None:
         result = decode_footpass_attack_v2(
             [
                 _action(1.0, "pass", "A"),
@@ -308,16 +308,34 @@ class FootpassAttackV2DecoderTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(len(result.attacks), 2)
+        self.assertEqual(len(result.attacks), 1)
+        attack = result.attacks[0]
+        self.assertEqual(attack.terminal.action_id, _action(2.4, "shot", "A").action_id)
+        action_ids = [item.action_id for item in attack.possession.actions]
         self.assertEqual(
-            [item.terminal.action_id for item in result.attacks],
-            [_action(2.0, "shot", "A").action_id, _action(2.4, "shot", "A").action_id],
+            action_ids,
+            [
+                _action(1.0, "pass", "A").action_id,
+                _action(2.0, "shot", "A").action_id,
+                _action(2.1, "block", "B").action_id,
+                _action(2.2, "drive", "A").action_id,
+                _action(2.4, "shot", "A").action_id,
+            ],
         )
-        first_ids = {item.action_id for item in result.attacks[0].possession.actions}
-        second_ids = {item.action_id for item in result.attacks[1].possession.actions}
-        self.assertFalse(first_ids.intersection(second_ids))
-        self.assertIn(_action(2.1, "block", "B").action_id, first_ids)
-        self.assertIn(_action(2.2, "drive", "A").action_id, second_ids)
+
+    def test_same_team_shot_outside_rebound_window_opens_a_new_attack(self) -> None:
+        result = decode_footpass_attack_v2(
+            [
+                _action(1.0, "pass", "A"),
+                _action(2.0, "shot", "A"),
+                _action(6.0, "drive", "A"),
+                _action(7.0, "shot", "A"),
+            ]
+        )
+
+        self.assertEqual(len(result.attacks), 2)
+        self.assertEqual(result.attacks[0].terminal.action_id, _action(2.0, "shot", "A").action_id)
+        self.assertEqual(result.attacks[1].terminal.action_id, _action(7.0, "shot", "A").action_id)
 
     def test_throw_in_closes_previous_possession_and_starts_restart(self) -> None:
         result = decode_footpass_attack_v2(
