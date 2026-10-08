@@ -11,6 +11,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import zlib
 import zipfile
 from collections import Counter, defaultdict
@@ -92,6 +93,34 @@ class CurlRangeReader(io.RawIOBase):
     def fetch_range(self, start: int, end: int) -> bytes:
         if start < 0 or end < start or end >= self._size:
             raise ValueError(f"invalid byte range {start}-{end} for {self._size}-byte file")
+        chunk_bytes = 2 * 1024 * 1024
+        spans: list[tuple[int, int]] = []
+        cursor = start
+        while cursor <= end:
+            chunk_end = min(cursor + chunk_bytes - 1, end)
+            spans.append((cursor, chunk_end))
+            cursor = chunk_end + 1
+        if len(spans) == 1:
+            return self._fetch_range_once(*spans[0])
+        parts: list[bytes | None] = [None] * len(spans)
+
+        def load(item: tuple[int, tuple[int, int]]) -> None:
+            index, span = item
+            parts[index] = self._fetch_range_once(*span)
+            print(
+                f"SoccerNet range {index + 1}/{len(spans)} "
+                f"({span[1] - span[0] + 1} bytes)",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(load, enumerate(spans)))
+        return b"".join(part for part in parts if part is not None)
+
+    def _fetch_range_once(self, start: int, end: int) -> bytes:
         command = self._base_command() + ["--range", f"{start}-{end}", self._url]
         result = subprocess.run(command, capture_output=True, check=False)
         if result.returncode != 0:
@@ -114,6 +143,19 @@ class CurlRangeReader(io.RawIOBase):
             "--proto",
             "=https",
             "--tlsv1.2",
+            "--connect-timeout",
+            "20",
+            "--retry",
+            "3",
+            "--retry-all-errors",
+            "--retry-delay",
+            "2",
+            "--speed-limit",
+            "2048",
+            "--speed-time",
+            "30",
+            "--max-time",
+            "120",
             "--user",
             self._auth,
         ]
