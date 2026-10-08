@@ -635,6 +635,99 @@ def build_gold_manifest(
     }
 
 
+def gold_progress_report(
+    project_root: Path,
+    *,
+    sealed_directory: Path | None = None,
+) -> dict[str, object]:
+    """Report 12-match gold progress without opening frozen-test labels.
+
+    P11 stays open until humans finish labels *and* domain-validate xG. This
+    helper only shows which split files exist so annotation can start on
+    development (18/24/47) before train, and test last.
+    """
+
+    root = Path(project_root)
+    sealed = Path(sealed_directory) if sealed_directory is not None else root / "data" / "sealed-test"
+
+    def _open_split(split: str, expected: tuple[int, ...], path: Path) -> dict[str, object]:
+        expected_ids = [f"game_{number}" for number in expected]
+        if not path.is_file():
+            return {
+                "path": str(path),
+                "exists": False,
+                "annotation_count": 0,
+                "matches_with_labels": [],
+                "matches_missing": expected_ids,
+            }
+        annotations = read_gold_annotations_jsonl(path, allow_frozen_test=False)
+        labelled = sorted(
+            {
+                canonical_match_id(item.match_id)
+                for item in annotations
+                if gold_split(item.match_id) == split
+            }
+        )
+        return {
+            "path": str(path),
+            "exists": True,
+            "annotation_count": len(annotations),
+            "matches_with_labels": labelled,
+            "matches_missing": [match_id for match_id in expected_ids if match_id not in labelled],
+        }
+
+    train = _open_split("train", HUMAN_TRAIN_MATCHES, root / "data" / "attack-v2-train.jsonl")
+    development = _open_split(
+        "development",
+        DEVELOPMENT_MATCHES,
+        root / "data" / "attack-v2-development.jsonl",
+    )
+
+    seal_path = sealed / FROZEN_TEST_SEAL_FILE
+    labels_path = sealed / FROZEN_TEST_LABEL_FILE
+    test: dict[str, object] = {
+        "path": str(sealed),
+        "expected_matches": list(FROZEN_TEST_MATCH_IDS),
+        "labels_exist": labels_path.is_file(),
+        "sealed": seal_path.is_file(),
+        "state": "not_started",
+    }
+    if seal_path.is_file():
+        test["state"] = "sealed"
+    elif labels_path.is_file():
+        test["state"] = "labels_present_unsealed"
+
+    if development["matches_missing"]:
+        next_step = "annotate_development"
+    elif train["matches_missing"]:
+        next_step = "annotate_train_after_dev_pilot"
+    elif test["state"] == "not_started":
+        next_step = "seal_test_only_after_dev_intra_rater"
+    elif test["state"] == "labels_present_unsealed":
+        next_step = "seal_gold_test"
+    else:
+        next_step = "human_domain_xg_validation"
+
+    return {
+        "schema_version": GOLD_SCHEMA_VERSION,
+        "p11_status": "open",
+        "closable_by_code": False,
+        "release_status": "research_only",
+        "next_step": next_step,
+        "order": ("development", "train", "test"),
+        "splits": {
+            "train": train,
+            "development": development,
+            "test": test,
+        },
+        "note": (
+            "Start continuous labels on development games 18/24/47. "
+            "Do not open frozen test (0/36/50) to tune. "
+            "P11 also needs human-domain xG validation after labels exist."
+        ),
+    }
+
+
 def deterministic_reannotation_blocks(
     durations_sec: Mapping[str, float],
     *,

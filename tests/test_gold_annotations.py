@@ -17,6 +17,7 @@ from attack_analysis.gold_annotations import (
     continuous_full_match_coverage_report,
     deterministic_reannotation_blocks,
     freeze_sealed_test_annotations,
+    gold_progress_report,
     gold_split,
     intra_rater_report,
     period_interval_content_sha256,
@@ -345,6 +346,31 @@ class GoldAnnotationTests(unittest.TestCase):
         report = intra_rater_report((first,), (second,))
         self.assertEqual(report["matched_sequences"], 1)
         self.assertEqual(report["median_boundary_disagreement_sec"], 0.1)
+
+    def test_gold_progress_starts_on_development_and_keeps_p11_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            report = gold_progress_report(root)
+            self.assertEqual(report["p11_status"], "open")
+            self.assertFalse(report["closable_by_code"])
+            self.assertEqual(report["next_step"], "annotate_development")
+            self.assertEqual(report["splits"]["development"]["matches_missing"], ["game_18", "game_24", "game_47"])
+            self.assertEqual(report["splits"]["test"]["state"], "not_started")
+
+            labels = root / "data" / "attack-v2-development.jsonl"
+            labels.parent.mkdir(parents=True)
+            labels.write_text(
+                json.dumps(annotation(match_id="game_18").to_dict(), ensure_ascii=False, sort_keys=True)
+                + "\n",
+                encoding="utf-8",
+            )
+            started = gold_progress_report(root)
+            self.assertIn("game_18", started["splits"]["development"]["matches_with_labels"])
+            self.assertEqual(
+                started["splits"]["development"]["matches_missing"],
+                ["game_24", "game_47"],
+            )
+            self.assertEqual(started["next_step"], "annotate_development")
 
 
 if __name__ == "__main__":
