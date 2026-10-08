@@ -1035,17 +1035,9 @@ def score_attack_with_observations(
             spatial["goalkeeper_in_camera"] = aligned["goalkeeper_in_camera"]
             spatial["provenance"]["goalkeeper_in_camera"] = "yolo+footpass_tactical"
     freeze_ready = bool(footpass_freeze and footpass_freeze.get("foe_players") is not None)
-    location_ready = xg_raw.get("x_shooter") is not None and xg_raw.get("y_shooter") is not None
     if ball_f1 is not None and ball_f1 < min_ball_f1 and not freeze_ready:
         spatial["ball_quality_warning"] = f"ball F1 {ball_f1:.2f} < {min_ball_f1:.2f}"
         spatial["provenance"]["ball_quality_warning"] = "yolo"
-        association = replace(association, xg_raw=xg_raw, spatial_context=spatial)
-        if not location_ready:
-            return FusedXGResult(
-                association=association,
-                xg_record=None,
-                withheld_reason="ball_quality_gate",
-            )
     association = replace(association, xg_raw=xg_raw, spatial_context=spatial)
     if attack.terminal.terminal_type not in {
         TerminalType.SHOT_ATTEMPT,

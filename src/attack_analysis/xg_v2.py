@@ -419,7 +419,14 @@ def _binary_outcome(value: object | None) -> int | None:
     if isinstance(value, Real) and float(value) in (0.0, 1.0):
         return int(value)
     label = _normalise_label(value)
-    if label is None or label in {"unknown", "unlabelled", "unlabeled", "na", "n_a"}:
+    if label is None or label in {
+        "unknown",
+        "unlabelled",
+        "unlabeled",
+        "unverified",
+        "na",
+        "n_a",
+    }:
         return None
     if label in _POSITIVE_OUTCOMES:
         return 1

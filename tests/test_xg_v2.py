@@ -272,6 +272,15 @@ class ConfirmedXGGateTests(unittest.TestCase):
         self.assertIsNotNone(record.features)
         self.assertIsNone(record.to_dict()["outcome"])
 
+    def test_unverified_video_shot_outcome_stays_unknown(self) -> None:
+        record = score_confirmed_attack_xg_v2(
+            _attack(TerminalType.SHOT_ATTEMPT, outcome="unverified"),
+            0.18,
+            model_id="model-checksum",
+        )
+        self.assertEqual(record.xg_probability, 0.18)
+        self.assertIsNone(record.outcome)
+
     def test_forced_out_censored_and_legacy_inputs_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "shot_attempt or headed_attempt"):
             score_confirmed_attack_xg_v2(
