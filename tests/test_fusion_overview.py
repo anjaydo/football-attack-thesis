@@ -115,6 +115,77 @@ class FusionAndOverviewTests(unittest.TestCase):
         self.assertTrue(association.xg_raw["goalkeeper_visible"])
         self.assertAlmostEqual(association.xg_raw["x_goalkeeper"], 102.0)
 
+    def _pose_shooter(self) -> TrackedObject:
+        keypoints = [(0.0, 0.0, 0.0)] * 17
+        keypoints[0] = (100.0, 105.0, 0.9)
+        keypoints[5] = (95.0, 115.0, 0.9)
+        keypoints[6] = (105.0, 115.0, 0.9)
+        keypoints[13] = (95.0, 160.0, 0.9)
+        keypoints[14] = (105.0, 160.0, 0.9)
+        keypoints[15] = (95.0, 195.0, 0.9)
+        keypoints[16] = (105.0, 195.0, 0.9)
+        return TrackedObject(
+            track_id="a1",
+            object_type="player",
+            confidence=0.9,
+            bbox=BoundingBox(85, 100, 115, 200),
+            team="team_a",
+            pitch_x=96.0,
+            pitch_y=29.0,
+            keypoints=tuple(tuple(value) for value in keypoints),
+        )
+
+    def _body_part(self, ball_y: float, *, false_ball: bool = False) -> object:
+        shooter = self._pose_shooter()
+        objects = [shooter]
+        if false_ball:
+            objects.append(
+                TrackedObject(
+                    track_id="far", object_type="ball", confidence=0.9, bbox=BoundingBox(600, 100, 608, 108)
+                )
+            )
+        objects.append(
+            TrackedObject(
+                track_id="ball",
+                object_type="ball",
+                confidence=0.8,
+                bbox=BoundingBox(111, ball_y - 4, 119, ball_y + 4),
+            )
+        )
+        frame = FrameObservation(frame_index=75, timestamp_sec=3.0, objects=tuple(objects))
+        association = associate_action_with_frame(
+            _action(3.0, "shot", "A", x=96.0, y=29.0), frame, team_mapping={"A": "team_a"}
+        )
+        return association.xg_raw["body_part"]
+
+    def test_hip_high_ball_is_a_foot_shot_not_a_header(self) -> None:
+        self.assertEqual(self._body_part(140.0, false_ball=True), "right_foot")
+
+    def test_ball_above_the_shoulders_is_a_header(self) -> None:
+        self.assertEqual(self._body_part(102.0), "head")
+
+    def test_shooter_labelled_goalkeeper_is_not_the_keeper(self) -> None:
+        shooter = TrackedObject(
+            track_id="a1",
+            object_type="goalkeeper",
+            confidence=0.9,
+            bbox=BoundingBox(10, 10, 30, 50),
+            team="team_a",
+            pitch_x=96.0,
+            pitch_y=29.0,
+        )
+        frame = FrameObservation(
+            frame_index=75,
+            timestamp_sec=3.0,
+            objects=(shooter, _player("b1", "team_b", 101.0, 33.0)),
+        )
+        association = associate_action_with_frame(
+            _action(3.0, "shot", "A", x=96.0, y=29.0), frame, team_mapping={"A": "team_a"}
+        )
+
+        self.assertEqual(association.track_id, "a1")
+        self.assertAlmostEqual(association.xg_raw["x_goalkeeper"], 101.0)
+
     def test_bbox_iou_and_ball_gate_warns_but_keeps_location_xg(self) -> None:
         self.assertGreater(
             bbox_iou(BoundingBox(0, 0, 10, 10), BoundingBox(5, 5, 15, 15)),

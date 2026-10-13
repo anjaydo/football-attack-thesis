@@ -17,6 +17,7 @@ from .geometry import (
 from .field_geometry import FieldGeometryDetector, FieldLineConfig, draw_field_geometry
 from .models import PITCH_LENGTH, PITCH_WIDTH
 from .motion import SpeedEstimator
+from .pitch_calibration import draw_pitch_model
 from .roi import PolygonROI
 from .scene import SceneCutDetector
 from .team import OnlineTeamClassifier, extract_jersey_feature
@@ -76,6 +77,10 @@ class VisionConfig:
     ball_tile_size: int = 0
     ball_tile_overlap: float = 0.1
     ball_max_side_px: float = 80.0
+    # The grass-polygon homography stretches the visible grass to the whole
+    # pitch. Turn it off when a per-frame calibration is supplied, so frames
+    # without a fit carry no pitch position instead of a wrong one.
+    polygon_pitch_fallback: bool = True
 
     def validate(self) -> None:
         if self.image_size <= 0:
@@ -830,7 +835,7 @@ def annotate_video(
             timestamp_sec = frame_index / fps
             frame_projector = projector_for_frame(projector, frame_index)
             calibration_confidence = projector_confidence(projector, frame_index)
-            projector_source = "oracle" if frame_projector is not None else None
+            projector_source = "supplied" if frame_projector is not None else None
             scene_cut = scene_detector.update(frame) if scene_detector else False
             if scene_cut:
                 scene_cuts_detected += 1
@@ -843,7 +848,7 @@ def annotate_video(
             if field_geometry is not None:
                 field_geometry_frames += 1
                 draw_field_geometry(cv2, frame, field_geometry)
-                if frame_projector is None:
+                if frame_projector is None and settings.polygon_pitch_fallback:
                     fallback = projector_from_pitch_polygon(field_geometry.pitch_polygon)
                     if fallback is not None:
                         frame_projector = fallback
@@ -857,10 +862,13 @@ def annotate_video(
                     )
                     overlay_color = (40, 200, 255)
                 else:
+                    source_label = getattr(projector, "overlay_label", "CALIBRATED pitch")
                     overlay_label = (
-                        f"CALIBRATED pitch | confidence {calibration_confidence or 0.0:.2f}"
+                        f"{source_label} | confidence {calibration_confidence or 0.0:.2f}"
                     )
                     overlay_color = (40, 230, 100)
+                    if getattr(projector, "draws_pitch_model", False):
+                        draw_pitch_model(cv2, frame, frame_projector)
                 cv2.putText(
                     frame,
                     overlay_label,

@@ -131,10 +131,19 @@ def resolve_xg_v2_model_path(project_root: Path, configured: str | None = None) 
 
 
 def _attack_to_preview_sequence(attack: AttackSequenceV2) -> AttackSequence:
+    # A generic FOOTPASS "header" is any headed touch; only the attack's headed
+    # terminal is an attempt that metrics count as a shot.
+    headed_terminal = (
+        attack.terminal.action_id
+        if attack.terminal.terminal_type is TerminalType.HEADED_ATTEMPT
+        else None
+    )
     events = tuple(
         Event(
             timestamp=action.timestamp_sec,
-            event_type=action.action_type,
+            event_type=(
+                "headed_attempt" if action.action_id == headed_terminal else action.action_type
+            ),
             team=attack.team_id,
             x=action.x,
             y=action.y,

@@ -10,6 +10,7 @@ FINAL_THIRD_X = 70.0
 PENALTY_BOX_X = 88.5
 PENALTY_BOX_Y_MIN = 13.84
 PENALTY_BOX_Y_MAX = 54.16
+SHOT_EVENT_TYPES = frozenset({"shot", "headed_attempt"})
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,7 @@ def _first_x(sequence: AttackSequence) -> float | None:
 def _last_x(sequence: AttackSequence) -> float | None:
     for event in reversed(sequence.events):
         # A shot's end point is the ball trajectory, not controlled progression.
-        if event.event_type == "shot" and event.x is not None:
+        if event.event_type in SHOT_EVENT_TYPES and event.x is not None:
             return event.x
         if event.end_x is not None:
             return event.end_x
@@ -68,7 +69,7 @@ def compute_metrics(sequence: AttackSequence) -> AttackMetrics:
     progression = max(0.0, (end_x or 0.0) - (start_x or 0.0))
     distance_available = max(1.0, 105.0 - (start_x or 0.0))
 
-    shots = [event for event in sequence.events if event.event_type == "shot"]
+    shots = [event for event in sequence.events if event.event_type in SHOT_EVENT_TYPES]
     xg_values = [event.xg for event in shots if event.xg is not None]
     on_target_outcomes = {"goal", "saved", "on_target"}
 

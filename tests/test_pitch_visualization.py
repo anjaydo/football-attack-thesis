@@ -226,6 +226,25 @@ class PitchVisualizationTests(unittest.TestCase):
         self.assertTrue(views[2].mirrored_to_same_side)
         self.assertIn("cùng mặt sân", views[2].annotation)
 
+    def test_observed_actions_without_end_point_can_be_reflected(self) -> None:
+        actions = tuple(
+            ObservedActionV2(
+                match_id="clip",
+                period=1,
+                frame=frame,
+                timestamp_sec=frame / 25.0,
+                action_type=action_type,
+                source_tier=SourceTier.VIDEO_ONLY,
+                actor_team_id="team_a",
+                possession_team_id="team_a",
+                x=x,
+                y=36.0,
+            )
+            for frame, action_type, x in ((2671, "drive", 90.9), (2691, "shot", 92.1), (2694, "block", 9.9))
+        )
+        views = pitch_event_views(actions, attack_relative=False)
+        self.assertTrue(views[2].mirrored_to_same_side)
+
     def test_a_pass_across_the_pitch_is_not_reflected(self) -> None:
         events = (
             Event(10.0, "pass", "1", x=30.0, y=34.0),

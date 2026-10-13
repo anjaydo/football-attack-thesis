@@ -217,6 +217,72 @@ def sample_preview_frames(path: Path, *, max_frames: int = 8) -> tuple[Any, ...]
         capture.release()
 
 
+def extract_browser_clip(
+    input_path: Path,
+    start_sec: float,
+    end_sec: float,
+    *,
+    output_dir: Path | None = None,
+) -> Path | None:
+    """Cut ``[start_sec, end_sec]`` into an H.264 file next to the source.
+
+    Re-encoding keeps the cut frame-accurate; a stream copy would snap to the
+    previous keyframe. Returns ``None`` when FFmpeg is unavailable or fails.
+    """
+
+    if end_sec <= start_sec:
+        raise ValueError("end_sec must be after start_sec")
+    if not input_path.is_file():
+        raise FileNotFoundError(f"video not found: {input_path}")
+    start_ms = int(round(max(0.0, start_sec) * 1000))
+    end_ms = int(round(end_sec * 1000))
+    folder = output_dir or input_path.parent
+    folder.mkdir(parents=True, exist_ok=True)
+    output_path = folder / f"{input_path.stem}-clip-{start_ms}-{end_ms}.mp4"
+    if (
+        output_path.is_file()
+        and output_path.stat().st_mtime >= input_path.stat().st_mtime
+        and output_path.stat().st_size > 0
+    ):
+        return output_path
+    ffmpeg = _ffmpeg_executable()
+    if ffmpeg is None:
+        return None
+    temporary_path = output_path.with_name(f"{output_path.stem}.partial.mp4")
+    completed = subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{start_ms / 1000:.3f}",
+            "-i",
+            str(input_path),
+            "-t",
+            f"{(end_ms - start_ms) / 1000:.3f}",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(temporary_path),
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0 or not temporary_path.is_file() or temporary_path.stat().st_size == 0:
+        temporary_path.unlink(missing_ok=True)
+        return None
+    temporary_path.replace(output_path)
+    return output_path
+
+
 def ensure_browser_compatible_video(input_path: Path) -> Path:
     """Prefer H.264 for Streamlit via FFmpeg; never use OpenCV OpenH264 writers."""
 

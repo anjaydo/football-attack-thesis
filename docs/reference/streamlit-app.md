@@ -20,7 +20,7 @@ Hoặc `attack-analysis serve-demo --port 8504`. Gói tối thiểu là extra `d
 | Tên | Giá trị |
 | --- | --- |
 | FOOTPASS | `<workspace>/FOOTPASS` |
-| Video | `FOOTPASS_VIDEOS_DIR` (mặc định `D:\videos`), dự phòng `G:\My Drive\footpass-videos` |
+| Video (tab FOOTPASS) | `FOOTPASS_VIDEOS_DIR` (mặc định `D:\videos`), qua `VideoPathResolver` |
 | xG-v1 | `models/xg-v1.joblib` |
 | xG-v2 | `XG_V2_MODEL_PATH` hoặc `models/xg-v2.joblib` |
 | Benchmark | `data/benchmarks.jsonl` |
@@ -75,7 +75,7 @@ Không có sidebar; mọi điều khiển nằm trong 3 tab.
 
 ## Tab 2: Exploratory upload
 
-- Chọn video từ ổ đĩa (`DEFAULT_VIDEO_ROOT/*.mp4`) hoặc tải lên (lưu theo SHA-256 vào `runs/upload-cache`).
+- Luôn chọn video từ máy qua `st.file_uploader` (MP4/MKV/MOV, tối đa 4 GB theo `.streamlit/config.toml`); file lưu theo SHA-256 nội dung vào `runs/upload-cache`, nên chọn lại cùng file dùng lại cache. Không còn danh sách video gắn sẵn.
 - Slider số frame YOLO 25–750 (mặc định 250); chọn device.
 - `run_cached_video_pipeline(..., runs/upload-cache/vision)` với `VisionConfig(image_size=960, field_lines=True)`, tier `video_only`.
 - Luôn kết thúc bằng verdict `insufficient_evidence`: video-only không xác nhận được terminal Attack-v2.
@@ -91,7 +91,7 @@ Không có sidebar; mọi điều khiển nằm trong 3 tab.
 
 | Loại | Hàm / thư mục | Khóa |
 | --- | --- | --- |
-| `st.cache_data` | `playbyplay_keys`, `local_video_digest`, `load_attack_v2_analysis` | Toàn bộ tham số (gồm ngưỡng class-aware) |
+| `st.cache_data` | `playbyplay_keys`, `load_attack_v2_analysis` | Toàn bộ tham số (gồm ngưỡng class-aware) |
 | `st.cache_resource` | `load_gold_outcome_index`, `load_benchmark_store`, `load_dynamic_projector`, `load_video_path_resolver` | Tham số + mtime HDF5 + `calibration_policy=4` |
 | Đĩa | `runs/window-cache` | Provenance + `CALIBRATION_CACHE_KEY`, `OVERLAY_CACHE_KEY`, match_key, mtime HDF5 và sync, offset preview |
 | Đĩa | `runs/upload-cache/vision` | Provenance của clip |

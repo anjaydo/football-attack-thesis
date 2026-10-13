@@ -5,7 +5,8 @@ import html
 import importlib
 import json
 import logging
-import os
+import math
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 
 from matplotlib import pyplot as plt
@@ -65,6 +66,7 @@ is_shot_event = _shot_xg.is_shot_event
 sequences_from_video_events = _v2_adapters.sequences_from_video_events
 BROWSER_CODECS = _browser_video.BROWSER_CODECS
 sample_preview_frames = _browser_video.sample_preview_frames
+extract_browser_clip = _browser_video.extract_browser_clip
 video_codec = _browser_video.video_codec
 plot_freeze_frame = _pitch_visualization.plot_freeze_frame
 aligned_event_xy = _pitch_visualization.aligned_event_xy
@@ -122,6 +124,25 @@ import attack_analysis.event_inference as _event_inference
 
 _event_inference = importlib.reload(_event_inference)
 infer_events_from_observations = _event_inference.infer_events_from_observations
+import attack_analysis.footpass_video_events as _footpass_video_events
+
+_footpass_video_events = importlib.reload(_footpass_video_events)
+extract_taad_highlights = _footpass_video_events.extract_taad_highlights
+import attack_analysis.footpass_dst as _footpass_dst
+import attack_analysis.pitch_calibration as _pitch_calibration
+
+_footpass_dst = importlib.reload(_footpass_dst)
+_pitch_calibration = importlib.reload(_pitch_calibration)
+extract_dst_highlights = _footpass_dst.extract_dst_highlights
+KeypointPitchProjector = _pitch_calibration.KeypointPitchProjector
+PitchModelConfig = _pitch_calibration.PitchModelConfig
+load_or_calibrate_video = _pitch_calibration.load_or_calibrate_video
+import attack_analysis.shot_outcome as _shot_outcome
+
+_shot_outcome = importlib.reload(_shot_outcome)
+ScoreboardReader = _shot_outcome.ScoreboardReader
+attack_with_video_outcome = _shot_outcome.attack_with_video_outcome
+infer_attack_outcomes = _shot_outcome.infer_attack_outcomes
 from attack_analysis.quality import read_observations_jsonl
 from attack_analysis.upload_pipeline import run_cached_video_pipeline, vision_cache_key
 from attack_analysis.video import inspect_video
@@ -139,21 +160,28 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = PROJECT_ROOT.parent
 load_project_environment(PROJECT_ROOT)
 DEFAULT_FOOTPASS = WORKSPACE_ROOT / "FOOTPASS"
-_CONFIGURED_VIDEO_ROOT = Path(os.environ.get("FOOTPASS_VIDEOS_DIR", r"D:\videos"))
-_MOUNTED_VIDEO_ROOT = Path(r"G:\My Drive\footpass-videos")
-DEFAULT_VIDEO_ROOT = (
-    _CONFIGURED_VIDEO_ROOT
-    if _CONFIGURED_VIDEO_ROOT.exists()
-    else _MOUNTED_VIDEO_ROOT
-    if _MOUNTED_VIDEO_ROOT.exists()
-    else _CONFIGURED_VIDEO_ROOT
-)
 DEFAULT_XG_MODEL = PROJECT_ROOT / "models" / "xg-v1.joblib"
 DEFAULT_XG_V2_MODEL = xg_v2_model_path(PROJECT_ROOT)
 DEFAULT_BENCHMARKS = PROJECT_ROOT / "data" / "benchmarks.jsonl"
 DEFAULT_EVENT_PROFILE = PROJECT_ROOT / "models" / "dst-thresholds-v1.json"
 DEFAULT_POSE_MODEL = PROJECT_ROOT / "yolo26n-pose.pt"
 DEFAULT_DETECTION_MODEL = PROJECT_ROOT / "yolo26n.pt"
+DEFAULT_PITCH_MODEL = PROJECT_ROOT / "models" / "football-pitch-detection.pt"
+MAX_WINDOW_SEC = 30.0
+UPLOAD_EVENT_SOURCES = {
+    "footpass_taad": "FOOTPASS TAAD",
+    "footpass_dst": "FOOTPASS TAAD → DST (h100, research)",
+}
+# The clip keeps a little context before the first event and after the finish
+# so the shot outcome (save, goal, rebound) stays visible.
+UPLOAD_CLIP_LEAD_SEC = 1.0
+UPLOAD_CLIP_TAIL_SEC = 3.0
+SHOT_OUTCOME_SOURCES = {
+    "video_scoreboard": "tỷ số trên scoreboard",
+    "video_scoreboard+ball": "tỷ số trên scoreboard + bóng YOLO trong khung thành",
+    "video_ball": "bóng YOLO trong khung thành",
+}
+VIDEO_SHOT_OUTCOME_LABELS = {"goal": "Bàn thắng", "no_goal": "Không thành bàn", "unknown": "Chưa rõ"}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -183,12 +211,40 @@ def show_event_pitch(items, *, heading: str, caption: str, attack_relative: bool
     st.altair_chart(chart, width="content", theme=None)
 
 
-def show_yolo_overlay(path: Path, *, heading: str, start_sec: float = 0.0) -> None:
-    """Play H.264 overlay in the browser; otherwise show sampled YOLO frames."""
+def show_yolo_overlay(
+    path: Path,
+    *,
+    heading: str,
+    start_sec: float = 0.0,
+    end_sec: float | None = None,
+    clip_dir: Path | None = None,
+) -> None:
+    """Play H.264 overlay in the browser; otherwise show sampled YOLO frames.
+
+    With ``end_sec`` only that window is shown, cut into its own file.
+    """
 
     if not path.is_file():
         return
     st.markdown(f"#### {heading}")
+    if end_sec is not None:
+        clip = None
+        try:
+            with st.spinner("Đang cắt video YOLO theo chuỗi sự kiện..."):
+                clip = extract_browser_clip(path, start_sec, end_sec, output_dir=clip_dir)
+        except Exception:
+            LOGGER.exception("Could not cut YOLO overlay clip")
+        start_clock, _spoken = _video_clock_parts(start_sec)
+        end_clock, _end_spoken = _video_clock_parts(end_sec)
+        if clip is not None:
+            st.caption(f"Đoạn {start_clock}–{end_clock} của video gốc ({end_sec - start_sec:.1f} giây).")
+            st.video(str(clip))
+            return
+        st.caption(
+            f"Không cắt được clip (thiếu FFmpeg). Video phát từ {start_clock} và dừng ở {end_clock}."
+        )
+        st.video(str(path), start_time=max(0, int(start_sec)), end_time=int(math.ceil(end_sec)))
+        return
     codec = ""
     try:
         codec = video_codec(path).strip("\x00")
@@ -239,16 +295,6 @@ st.caption(
 def playbyplay_keys(path: str) -> tuple[str, ...]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     return tuple(str(item) for item in payload.get("keys", payload.get("events", {}).keys()))
-
-
-@st.cache_data(show_spinner="Đang tạo hash video local...")
-def local_video_digest(path: str, size: int, modified_at: float) -> str:
-    del size, modified_at  # Included in the Streamlit cache key.
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        for block in iter(lambda: handle.read(4 * 1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 @st.cache_data(show_spinner="Loading FOOTPASS actions and decoding v2 possessions...")
@@ -642,14 +688,22 @@ def render_calibrated_window(
         key=f"window_end_{widget_key}",
     )
     end_column.caption(f"Trên video: {_video_clock_label(float(end_sec))}")
+    selected_duration = end_sec - start_sec
+    start_sec = max(float(start_sec), float(end_sec) - MAX_WINDOW_SEC)
     duration = end_sec - start_sec
     start_clock, _start_spoken = _video_clock_parts(float(start_sec))
     end_clock, _end_spoken = _video_clock_parts(float(end_sec))
     st.caption(
         f"Cửa sổ {start_clock} → {end_clock} · dài {duration:.1f} giây · "
         f"khoảng {max(0, round(duration * metadata.fps)):,} frame Full HD. "
-        "Giới hạn 30 giây để phù hợp GPU 6 GB và giữ thời gian demo hợp lý."
+        f"Tối đa {MAX_WINDOW_SEC:.0f} giây để phù hợp GPU 6 GB và giữ thời gian demo hợp lý."
     )
+    if selected_duration > MAX_WINDOW_SEC:
+        st.info(
+            f"Cửa sổ đã chọn dài {selected_duration:.1f} giây. Chỉ phân tích "
+            f"{MAX_WINDOW_SEC:.0f} giây cuối ({start_clock} → {end_clock}), "
+            "là đoạn dẫn tới cú dứt điểm."
+        )
 
     result_key = f"calibrated_window_result_{widget_key}_{start_sec:.2f}_{end_sec:.2f}"
     if st.button(
@@ -659,8 +713,6 @@ def render_calibrated_window(
     ):
         if duration <= 0:
             st.error("Thời điểm kết thúc phải lớn hơn thời điểm bắt đầu.")
-        elif duration > 30.0:
-            st.error("Hãy chọn cửa sổ tối đa 30 giây.")
         else:
             try:
                 start_frame = max(0, int(round(start_sec * metadata.fps)))
@@ -991,6 +1043,7 @@ ACTION_LABELS = {
     "cross": "Tạt bóng",
     "header": "Đánh đầu",
     "headed_attempt": "Đánh đầu về cầu môn",
+    "headed_shot": "Đánh đầu về cầu môn",
     "shot": "Dứt điểm",
     "shot_attempt": "Dứt điểm",
     "block": "Chặn bóng",
@@ -1144,7 +1197,7 @@ def render_conclusion_v2(
                     "Source": "yolo",
                 }
             )
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        st.dataframe(pd.DataFrame(rows).astype({"Value": str}), width="stretch", hide_index=True)
         if spatial.get("ball_quality_warning"):
             st.caption(
                 f"{spatial['ball_quality_warning']} — xG vẫn được tính từ vị trí sút "
@@ -1850,7 +1903,7 @@ with analysis_tab:
                 "Tactical HDF5 is required for oracle/predicted assisted source tiers and stable team identity."
             )
 
-def conclude_attack_v2(attack: AttackSequenceV2, *, frames=None):
+def conclude_attack_v2(attack: AttackSequenceV2, *, frames=None, shot_outcome: dict | None = None):
     """Same research conclusion as the FOOTPASS tab: xG, chance quality, tactical read."""
 
     store = load_benchmark_store()
@@ -1877,6 +1930,17 @@ def conclude_attack_v2(attack: AttackSequenceV2, *, frames=None):
         benchmarks=store,
     )
     legacy_bundle = evidence.as_legacy_bundle()
+    if shot_outcome:
+        label = VIDEO_SHOT_OUTCOME_LABELS.get(str(shot_outcome.get("outcome")), "Chưa rõ")
+        legacy_bundle = dataclass_replace(
+            legacy_bundle,
+            limitations=(
+                *legacy_bundle.limitations,
+                f"Kết quả thực tế của cú dứt điểm (ước tính từ video, không phải nhãn gold): {label}; "
+                f"căn cứ: {shot_outcome.get('summary')}. Scoreboard không gắn được với team_a/team_b, "
+                "bàn thắng được quy cho đội đang tấn công. Đánh giá cần xét cả xG lẫn kết quả này.",
+            ),
+        )
     tools = EvidenceToolRegistry(
         {attack.attack_id: legacy_bundle},
         benchmarks=store,
@@ -1910,16 +1974,187 @@ def _upload_attack_label(attack: AttackSequenceV2) -> str:
     )
 
 
-def render_extracted_events(extracted: dict[str, object]) -> None:
-    """Phase 1 result: event list and attack sequences, with no model scores."""
+def upload_event_views(extracted: dict[str, object]) -> dict[str, dict[str, object]]:
+    """Event sources available after Phase 1, keyed like ``UPLOAD_EVENT_SOURCES``."""
 
+    shared = {
+        key: extracted.get(key)
+        for key in (
+            "observations_path",
+            "annotated_video",
+            "match_id",
+            "scoreboard_reads",
+            "scoreboard_error",
+        )
+    }
+    views = {str(extracted.get("method") or "footpass_taad"): extracted}
+    dst = extracted.get("dst")
+    if isinstance(dst, dict):
+        views["footpass_dst"] = {**dst, **shared}
+    return views
+
+
+def read_scoreboard_with_progress(video_path: Path, cache_path: Path | None):
+    """Score bug readings every second (RapidOCR on CPU), cached next to the observations."""
+
+    progress = st.progress(0.0, text="Đọc tỷ số trên scoreboard")
+    try:
+        readings = ScoreboardReader().read_video(
+            video_path,
+            cache_path=cache_path,
+            progress=lambda done, total: progress.progress(
+                min(1.0, done / max(1, total)),
+                text=f"Đọc tỷ số trên scoreboard: {done}/{total} giây video",
+            ),
+        )
+        return readings, None
+    except (ImportError, OSError, RuntimeError) as error:
+        LOGGER.warning("Scoreboard OCR unavailable: %s", error)
+        return (), str(error)
+    finally:
+        progress.empty()
+
+
+def apply_video_outcomes(attacks, readings, frames):
+    """Attacks with the video-estimated shot outcome attached, plus evidence per attack id."""
+
+    attacks = tuple(attacks or ())
+    if not attacks:
+        return attacks, {}
+    outcomes = infer_attack_outcomes(attacks, readings, tuple(frames or ()))
+    enriched = tuple(
+        attack_with_video_outcome(attack, outcomes[attack.attack_id]) for attack in attacks
+    )
+    return enriched, {key: value.to_dict() for key, value in outcomes.items()}
+
+
+def _shot_outcome_text(evidence: dict | None) -> str:
+    if not evidence:
+        return "—"
+    return VIDEO_SHOT_OUTCOME_LABELS.get(str(evidence.get("outcome")), "Chưa rõ")
+
+
+def _shot_outcome_basis(evidence: dict | None) -> str:
+    if not evidence:
+        return "—"
+    source = SHOT_OUTCOME_SOURCES.get(str(evidence.get("source") or ""))
+    summary = str(evidence.get("summary") or "")
+    return f"{source}: {summary}" if source else summary
+
+
+def _outcome_near(outcomes: dict, timestamp_sec: float) -> dict | None:
+    best = min(
+        outcomes.values(),
+        key=lambda item: abs(float(item.get("shot_sec") or 0.0) - timestamp_sec),
+        default=None,
+    )
+    if best is None or abs(float(best.get("shot_sec") or 0.0) - timestamp_sec) > 0.5:
+        return None
+    return best
+
+
+def render_extracted_events(extracted: dict[str, object]) -> None:
+    """Phase 1 result: calibration, then TAAD and DST event lists side by side."""
+
+    calibration = extracted.get("calibration") or {}
+    if calibration:
+        st.caption(
+            f"Tọa độ sân: hiệu chỉnh từ điểm mốc sân (model {calibration.get('model')}). "
+            f"{float(calibration.get('coverage') or 0.0):.0%} frame có tọa độ, "
+            f"{int(calibration.get('direct_fits') or 0)}/{int(calibration.get('frames') or 0)} frame fit trực tiếp, "
+            f"trung vị {calibration.get('median_inliers')} điểm mốc, sai số "
+            f"{float(calibration.get('median_rmse_m') or 0.0):.2f} m. Frame không fit được để trống tọa độ "
+            "thay vì đoán. Video YOLO vẽ lại đường kẻ sân đã hiệu chỉnh (màu hồng) để kiểm tra bằng mắt."
+        )
+    views = upload_event_views(extracted)
+    if "footpass_dst" not in views:
+        if extracted.get("dst_error"):
+            st.warning(f"Không chạy được FOOTPASS DST: {extracted['dst_error']}")
+        _render_event_source(extracted)
+        return
+    tabs = st.tabs([UPLOAD_EVENT_SOURCES.get(key, key) for key in views])
+    for tab, view in zip(tabs, views.values()):
+        with tab:
+            _render_event_source(view)
+
+
+def _render_event_source(extracted: dict[str, object]) -> None:
     events = tuple(extracted.get("events") or ())
     attacks = tuple(extracted.get("attacks") or ())
-    st.caption(
-        f"{len(events)} sự kiện · {extracted.get('possession_count', 0)} possession · "
-        f"{len(attacks)} chuỗi tấn công. "
-        "Chỉ giữ quỹ đạo bóng liên tục và cú sút phải đi tới sát khung thành."
-    )
+    highlights = tuple(extracted.get("highlights") or ())
+    if extracted.get("method") == "footpass_taad":
+        st.caption(
+            f"{len(highlights)} đoạn camera toàn cảnh · {len(events)} sự kiện · "
+            f"{len(attacks)} chuỗi tấn công. Sự kiện do FOOTPASS TAAD (checkpoint H100) "
+            "nhận trên track cầu thủ YOLO. Cận cảnh, ăn mừng và replay bị loại vì TAAD chỉ học camera chính. "
+            "Đội của mọi sự kiện trong một đoạn là đội thắng phiếu theo điểm TAAD, vì màu áo YOLO hay nhảy."
+        )
+    elif extracted.get("method") == "footpass_dst":
+        st.caption(
+            f"{len(highlights)} đoạn · {len(events)} sự kiện · {len(attacks)} chuỗi tấn công. "
+            "FOOTPASS DST (checkpoint DST_Baseline_h100, ablation chưa promote, research only) đọc lại "
+            "logits TAAD cùng vị trí, vận tốc cầu thủ trên sân đã hiệu chỉnh. "
+            f"{int(extracted.get('assigned_tracks') or 0)} track YOLO được gán vai trò FOOTPASS theo vị trí "
+            "trung bình. DST được train khi biết vị trí đủ 22 cầu thủ; video chỉ thấy một phần, người ngoài "
+            "khung hình để giá trị thiếu (-15), nên DST ở đây yếu hơn số đo trên FOOTPASS val."
+        )
+    else:
+        st.caption(
+            f"{len(events)} sự kiện · {extracted.get('possession_count', 0)} possession · "
+            f"{len(attacks)} chuỗi tấn công. Suy luận từ quỹ đạo bóng (không có FOOTPASS TAAD)."
+        )
+    shot_outcomes = dict(extracted.get("shot_outcomes") or {})
+    if extracted.get("scoreboard_error"):
+        st.warning(
+            f"Không đọc được scoreboard ({extracted['scoreboard_error']}). Kết quả dứt điểm chỉ dựa vào bóng YOLO."
+        )
+    elif attacks:
+        st.caption(
+            f"Kết quả dứt điểm ước tính từ video, không phải nhãn gold: đọc tỷ số scoreboard mỗi giây "
+            f"({int(extracted.get('scoreboard_reads') or 0)} lần đọc được) và tìm bóng YOLO sau vạch "
+            "giữa hai cột dọc trong 3 giây sau cú sút. Bàn thắng khi tổng tỷ số tăng 1 sau cú sút "
+            "(trước cú sút kế tiếp); không thành bàn khi tỷ số vẫn giữ ít nhất 10 giây sau cú sút. "
+            "Scoreboard không gắn được với team_a/team_b nên bàn thắng được quy cho đội đang tấn công."
+        )
+    if highlights:
+        segment_rows = []
+        model_name = "DST" if extracted.get("method") == "footpass_dst" else "TAAD"
+        for highlight in highlights:
+            terminal_outcome = (
+                _outcome_near(shot_outcomes, float(highlight.terminal.timestamp_sec))
+                if highlight.terminal is not None
+                else None
+            )
+            start_clock, _spoken = _video_clock_parts(highlight.segment.start_sec)
+            end_clock, _end_spoken = _video_clock_parts(highlight.segment.end_sec)
+            terminal = highlight.terminal
+            direction = getattr(highlight, "left_to_right", None)
+            segment_rows.append(
+                {
+                    "Đoạn toàn cảnh": f"{start_clock}–{end_clock}",
+                    "Đội tấn công": highlight.team or "—",
+                    "Hướng tấn công": (
+                        "—"
+                        if direction is None
+                        else "→ khung thành phải"
+                        if direction
+                        else "← khung thành trái"
+                    ),
+                    "Kết thúc": (
+                        (
+                            f"Dứt điểm ({model_name} nhận là chặn bóng)"
+                            if terminal.action == "block"
+                            else ACTION_LABELS.get(terminal.action, terminal.action)
+                        )
+                        + f" {terminal.timestamp_sec:.2f}s ({model_name} {terminal.score:.2f})"
+                        if terminal is not None
+                        else "Không thấy cú sút/đánh đầu"
+                    ),
+                    "Kết quả (ước tính video)": _shot_outcome_text(terminal_outcome),
+                    "Số sự kiện": len(highlight.events),
+                }
+            )
+        st.dataframe(pd.DataFrame(segment_rows), width="stretch", hide_index=True)
     if not events:
         st.warning("Không suy ra sự kiện. Cần cầu thủ, bóng và tọa độ sân.")
         return
@@ -1931,6 +2166,12 @@ def render_extracted_events(extracted: dict[str, object]) -> None:
                 "Thời gian": f"{clock} ({event.timestamp:.2f}s)",
                 "Sự kiện": ACTION_LABELS.get(event.event_type, event.event_type),
                 "Đội": event.team,
+                "Track": event.player_id or "—",
+                "Điểm model": (
+                    f"{event.confidence:.2f}"
+                    if event.source in {"footpass_taad", "footpass_dst"}
+                    else "—"
+                ),
                 "Tọa độ": (
                     f"({event.x:.1f}, {event.y:.1f})"
                     if event.x is not None and event.y is not None
@@ -1941,7 +2182,7 @@ def render_extracted_events(extracted: dict[str, object]) -> None:
     st.dataframe(pd.DataFrame(event_rows), width="stretch", hide_index=True)
     if not attacks:
         st.info(
-            "Chưa có chuỗi tấn công. Một attack cần kiểm soát bóng rồi kết thúc bằng cú sút ước lượng."
+            "Chưa có chuỗi tấn công. Một attack cần kiểm soát bóng rồi kết thúc bằng cú sút hoặc đánh đầu."
         )
         return
     attack_rows = []
@@ -1955,6 +2196,8 @@ def render_extracted_events(extracted: dict[str, object]) -> None:
                 "Bắt đầu": start_clock,
                 "Kết thúc": end_clock,
                 "Đội": attack.team_id,
+                "Kết quả dứt điểm": _shot_outcome_text(shot_outcomes.get(attack.attack_id)),
+                "Căn cứ": _shot_outcome_basis(shot_outcomes.get(attack.attack_id)),
             }
         )
     st.dataframe(pd.DataFrame(attack_rows), width="stretch", hide_index=True)
@@ -1963,6 +2206,16 @@ def render_extracted_events(extracted: dict[str, object]) -> None:
 def render_upload_analysis(extracted: dict[str, object], *, video_path: Path) -> None:
     """Phase 2: YOLO overlay, xG-v2 and the AI read for one extracted attack."""
 
+    views = upload_event_views(extracted)
+    if len(views) > 1:
+        source = st.radio(
+            "Nguồn chuỗi tấn công",
+            tuple(views),
+            format_func=lambda key: UPLOAD_EVENT_SOURCES.get(key, key),
+            horizontal=True,
+            key=f"upload_source_{extracted.get('match_id')}",
+        )
+        extracted = {**views[source], "match_id": f"{extracted.get('match_id')}-{source}"}
     attacks = tuple(extracted.get("attacks") or ())
     if not attacks:
         st.info(
@@ -1987,7 +2240,11 @@ def render_upload_analysis(extracted: dict[str, object], *, video_path: Path) ->
             frames = (
                 read_observations_jsonl(observations_path) if observations_path.is_file() else None
             )
-            overview, evidence, conclusion = conclude_attack_v2(attack, frames=frames)
+            overview, evidence, conclusion = conclude_attack_v2(
+                attack,
+                frames=frames,
+                shot_outcome=dict(extracted.get("shot_outcomes") or {}).get(attack.attack_id),
+            )
         st.session_state[f"upload_conclusion_{extracted.get('match_id')}"] = {
             "attack_id": attack.attack_id,
             "overview": overview,
@@ -2003,10 +2260,30 @@ def render_upload_analysis(extracted: dict[str, object], *, video_path: Path) ->
         show_yolo_overlay(
             annotated_path,
             heading="YOLO",
-            start_sec=attack.possession.start_sec,
+            start_sec=max(0.0, attack.possession.start_sec - UPLOAD_CLIP_LEAD_SEC),
+            end_sec=attack.possession.end_sec + UPLOAD_CLIP_TAIL_SEC,
         )
     elif video_path.is_file():
-        st.video(str(video_path), start_time=max(0, int(attack.possession.start_sec)))
+        show_yolo_overlay(
+            video_path,
+            heading="Video gốc (không có overlay YOLO)",
+            start_sec=max(0.0, attack.possession.start_sec - UPLOAD_CLIP_LEAD_SEC),
+            end_sec=attack.possession.end_sec + UPLOAD_CLIP_TAIL_SEC,
+            clip_dir=PROJECT_ROOT / "runs" / "upload-cache" / "clips",
+        )
+    shot_outcome = dict(extracted.get("shot_outcomes") or {}).get(attack.attack_id)
+    if shot_outcome:
+        outcome_text = _shot_outcome_text(shot_outcome)
+        message = (
+            f"Kết quả thực tế (ước tính từ video, không phải nhãn gold): **{outcome_text}**. "
+            f"{_shot_outcome_basis(shot_outcome)}."
+        )
+        if shot_outcome.get("outcome") == "goal":
+            st.success(message)
+        elif shot_outcome.get("outcome") == "no_goal":
+            st.info(message)
+        else:
+            st.warning(message)
     render_conclusion_v2(stored["conclusion"], stored["evidence"], stored["overview"])
     timeline_rows = []
     xg_by_action = {}
@@ -2038,41 +2315,25 @@ def render_upload_analysis(extracted: dict[str, object], *, video_path: Path) ->
 
 
 with upload_tab:
-    input_mode = st.radio(
-        "Nguồn video",
-        ("Ổ D (không cần upload)", "Upload clip"),
-        horizontal=True,
-    )
     cache_dir = PROJECT_ROOT / "runs" / "upload-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     clip_path: Path | None = None
     digest: str | None = None
-    source_identity: str | None = None
-    local_file_stat: os.stat_result | None = None
-    if input_mode == "Ổ D (không cần upload)":
-        local_videos = tuple(sorted(DEFAULT_VIDEO_ROOT.glob("*.mp4"))) if DEFAULT_VIDEO_ROOT.is_dir() else ()
-        if local_videos:
-            selected_video = st.selectbox(
-                "Video local",
-                local_videos,
-                format_func=lambda path: path.name,
-            )
-            clip_path = selected_video
-            local_file_stat = clip_path.stat()
-            source_identity = hashlib.sha256(
-                f"{clip_path.resolve()}|{local_file_stat.st_size}|{local_file_stat.st_mtime}".encode()
-            ).hexdigest()
-        else:
-            st.warning(f"Không tìm thấy video MP4 trong {DEFAULT_VIDEO_ROOT}.")
+    uploaded = st.file_uploader(
+        "Chọn video từ máy",
+        type=("mp4", "mkv", "mov"),
+        help="Video được lưu vào runs/upload-cache theo SHA-256 nội dung; chọn lại cùng file sẽ dùng lại cache.",
+    )
+    if uploaded is None:
+        st.info("Chọn một video phát sóng (MP4/MKV/MOV) để bắt đầu.")
     else:
-        uploaded = st.file_uploader("Upload a broadcast clip", type=("mp4", "mkv", "mov"))
-        if uploaded is not None:
-            content = uploaded.getvalue()
-            digest = hashlib.sha256(content).hexdigest()
-            source_identity = digest
-            clip_path = cache_dir / f"{digest}{Path(uploaded.name).suffix.lower()}"
-            if not clip_path.exists():
-                clip_path.write_bytes(content)
+        content = uploaded.getvalue()
+        digest = hashlib.sha256(content).hexdigest()
+        clip_path = cache_dir / f"{digest}{Path(uploaded.name).suffix.lower()}"
+        if not clip_path.exists():
+            clip_path.write_bytes(content)
+        del content
+    source_identity = digest
 
     if clip_path is not None and source_identity is not None:
         metadata: dict = {}
@@ -2123,6 +2384,7 @@ with upload_tab:
                 ("0", "cpu") if gpu_ready else ("cpu",),
                 format_func=lambda value: "GPU CUDA" if value == "0" else "CPU",
             )
+            use_landmarks = device != "cpu" and DEFAULT_PITCH_MODEL.is_file()
             vision_config = VisionConfig(
                 pose_model=str(DEFAULT_POSE_MODEL),
                 detection_model=str(DEFAULT_DETECTION_MODEL),
@@ -2130,41 +2392,137 @@ with upload_tab:
                 image_size=960,
                 max_frames=max_frames,
                 field_lines=True,
+                polygon_pitch_fallback=not use_landmarks,
             )
-            extract_key = f"upload_extract_stable_{source_identity}_{max_frames}_{device}"
+            if not use_landmarks:
+                st.caption(
+                    "Không có model điểm mốc sân hoặc đang chạy CPU: tọa độ sân lấy từ vùng cỏ "
+                    "(ép vùng cỏ thấy được thành cả sân), vị trí cầu thủ sẽ sai."
+                )
+            extract_key = f"upload_extract_v3_{source_identity}_{max_frames}_{device}_{use_landmarks}"
             if st.button("Trích xuất sự kiện", type="primary"):
                 try:
                     with st.spinner("Đang trích xuất sự kiện..."):
-                        if digest is None:
-                            assert local_file_stat is not None
-                            digest = local_video_digest(
-                                str(clip_path),
-                                local_file_stat.st_size,
-                                local_file_stat.st_mtime,
+                        projector = None
+                        calibration_summary: dict[str, object] = {}
+                        cache_context: dict[str, object] = {}
+                        if use_landmarks:
+                            calibration_progress = st.progress(0.0, text="Hiệu chỉnh sân từ điểm mốc...")
+                            calibration = load_or_calibrate_video(
+                                clip_path,
+                                cache_dir / "pitch",
+                                PitchModelConfig(str(DEFAULT_PITCH_MODEL), device=f"cuda:{device}"),
+                                video_digest=digest,
+                                max_frames=max_frames,
+                                progress=lambda done, total: calibration_progress.progress(
+                                    min(1.0, done / max(1, total)),
+                                    text=f"Hiệu chỉnh sân từ điểm mốc: {done}/{total} frame",
+                                ),
                             )
+                            calibration_progress.empty()
+                            projector = KeypointPitchProjector(calibration)
+                            calibration_summary = dict(calibration.summary)
+                            cache_context = {"pitch_calibration": calibration.digest()}
                         manifest = run_cached_video_pipeline(
                             clip_path,
                             cache_dir / "vision",
                             digest,
                             vision_config,
+                            projector=projector,
+                            cache_context=cache_context,
                         )
                         observations_path = Path(str((manifest.get("outputs") or {}).get("observations") or ""))
                         frames = (
                             read_observations_jsonl(observations_path) if observations_path.is_file() else ()
                         )
-                        events = infer_events_from_observations(frames) if frames else ()
-                        _actions, decoded = sequences_from_video_events(
-                            events,
-                            match_id=f"upload-{(source_identity or 'clip')[:12]}",
-                            fps=float((manifest.get("vision") or {}).get("fps") or metadata.get("fps") or 25.0),
+                        match_id = f"upload-{(source_identity or 'clip')[:12]}"
+                        fps = float((manifest.get("vision") or {}).get("fps") or metadata.get("fps") or 25.0)
+                        method = "footpass_taad"
+                        highlights = ()
+                        dst_view: dict[str, object] | None = None
+                        dst_error: str | None = None
+                        try:
+                            if device == "cpu":
+                                raise RuntimeError("FOOTPASS TAAD cần GPU CUDA")
+                            taad_result = extract_taad_highlights(
+                                clip_path,
+                                frames,
+                                width=float(metadata.get("width") or 1920),
+                                height=float(metadata.get("height") or 1080),
+                                fps=fps,
+                                match_id=match_id,
+                                cache_path=observations_path.parent / "taad_detections.json",
+                            )
+                            highlights = taad_result.highlights
+                            decoded = taad_result.decoded
+                            events = tuple(
+                                event for highlight in highlights for event in highlight.events
+                            )
+                            try:
+                                dst_result = extract_dst_highlights(
+                                    frames,
+                                    taad_result.segments,
+                                    taad_result.outputs,
+                                    taad_result.highlights,
+                                    match_id=match_id,
+                                    fps=fps,
+                                    device=f"cuda:{device}",
+                                )
+                                dst_view = {
+                                    "method": "footpass_dst",
+                                    "highlights": dst_result.highlights,
+                                    "events": tuple(
+                                        event
+                                        for highlight in dst_result.highlights
+                                        for event in highlight.events
+                                    ),
+                                    "attacks": dst_result.decoded.attacks,
+                                    "possession_count": len(dst_result.decoded.possessions),
+                                    "checkpoint": dst_result.checkpoint,
+                                    "assigned_tracks": sum(
+                                        len(items) for items in dst_result.assignments.values()
+                                    ),
+                                }
+                            except (FileNotFoundError, RuntimeError, ImportError, ValueError) as error:
+                                LOGGER.warning("DST unavailable: %s", error)
+                                dst_error = str(error)
+                        except (FileNotFoundError, RuntimeError, ImportError) as taad_error:
+                            LOGGER.warning("TAAD unavailable, falling back to ball heuristics: %s", taad_error)
+                            st.warning(f"Không chạy được FOOTPASS TAAD ({taad_error}). Dùng suy luận từ quỹ đạo bóng.")
+                            method = "ball_heuristic"
+                            events = infer_events_from_observations(frames) if frames else ()
+                            _actions, decoded = sequences_from_video_events(
+                                events,
+                                match_id=match_id,
+                                fps=fps,
+                            )
+                    readings, scoreboard_error = read_scoreboard_with_progress(
+                        clip_path,
+                        observations_path.parent / "scoreboard.json"
+                        if observations_path.is_file()
+                        else None,
+                    )
+                    attacks, shot_outcomes = apply_video_outcomes(decoded.attacks, readings, frames)
+                    if dst_view is not None:
+                        dst_attacks, dst_outcomes = apply_video_outcomes(
+                            dst_view["attacks"], readings, frames
                         )
+                        dst_view = {**dst_view, "attacks": dst_attacks, "shot_outcomes": dst_outcomes}
                     st.session_state[extract_key] = {
+                        "method": method,
+                        "highlights": highlights,
                         "events": events,
-                        "attacks": decoded.attacks,
+                        "attacks": attacks,
+                        "shot_outcomes": shot_outcomes,
+                        "scoreboard_reads": len(readings),
+                        "scoreboard_error": scoreboard_error,
                         "possession_count": len(decoded.possessions),
-                        "match_id": f"upload-{(source_identity or 'clip')[:12]}",
+                        "match_id": match_id,
                         "observations_path": str(observations_path),
                         "annotated_video": str((manifest.get("outputs") or {}).get("annotated_video") or ""),
+                        "calibration": calibration_summary,
+                        "dst": dst_view,
+                        "dst_error": dst_error,
                     }
                 except ValueError as error:
                     st.session_state.pop(extract_key, None)

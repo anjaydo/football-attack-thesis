@@ -14,6 +14,8 @@ from .xg_v2 import ConfirmedXGRecordV2, TrainedXGModelV2
 
 PLAYER_TYPES = frozenset({"player", "goalkeeper"})
 COCO_NOSE = 0
+COCO_LEFT_SHOULDER = 5
+COCO_RIGHT_SHOULDER = 6
 COCO_LEFT_KNEE = 13
 COCO_RIGHT_KNEE = 14
 COCO_LEFT_ANKLE = 15
@@ -190,8 +192,30 @@ def infer_body_part_from_pose(
         return "head"
     if shooter is None or not shooter.keypoints:
         return None
-    balls = [item for item in frame.objects if item.object_type == "ball"]
-    ball = balls[0] if balls else None
+    feet = ((shooter.bbox.x1 + shooter.bbox.x2) / 2.0, shooter.bbox.y2)
+    height = max(1.0, shooter.bbox.y2 - shooter.bbox.y1)
+    # Frames carry several false balls; only one near his body can be his.
+    balls = [
+        item
+        for item in frame.objects
+        if item.object_type == "ball"
+        and hypot(
+            (item.bbox.x1 + item.bbox.x2) / 2.0 - feet[0],
+            (item.bbox.y1 + item.bbox.y2) / 2.0 - feet[1],
+        )
+        <= 1.3 * height
+    ]
+    ball = (
+        min(
+            balls,
+            key=lambda item: hypot(
+                (item.bbox.x1 + item.bbox.x2) / 2.0 - feet[0],
+                (item.bbox.y1 + item.bbox.y2) / 2.0 - feet[1],
+            ),
+        )
+        if balls
+        else None
+    )
     if ball is not None:
         ball_xy = (
             (ball.bbox.x1 + ball.bbox.x2) / 2.0,
@@ -203,14 +227,28 @@ def infer_body_part_from_pose(
             (shooter.bbox.x1 + shooter.bbox.x2) / 2.0,
             shooter.bbox.y2,
         )
+    shoulders = [
+        point[1]
+        for point in (
+            _keypoint_xy(shooter.keypoints, COCO_LEFT_SHOULDER),
+            _keypoint_xy(shooter.keypoints, COCO_RIGHT_SHOULDER),
+        )
+        if point is not None
+    ]
+    # A ball bouncing at hip height sits nearer the nose than the ankles in 2D;
+    # a header needs the ball above the shoulders. A knee-high ball is volleyed
+    # with that leg's foot.
+    head_allowed = bool(shoulders) and ball_xy[1] < min(shoulders)
     ranked: list[tuple[float, str]] = []
     for name, index in (
         ("head", COCO_NOSE),
         ("left_foot", COCO_LEFT_ANKLE),
         ("right_foot", COCO_RIGHT_ANKLE),
-        ("other", COCO_LEFT_KNEE),
-        ("other", COCO_RIGHT_KNEE),
+        ("left_foot", COCO_LEFT_KNEE),
+        ("right_foot", COCO_RIGHT_KNEE),
     ):
+        if name == "head" and not head_allowed:
+            continue
         point = _keypoint_xy(shooter.keypoints, index)
         if point is None:
             continue
@@ -415,7 +453,16 @@ def infer_goalkeeper(
     players: tuple[TrackedObject, ...],
     *,
     attacking_team: str | None,
+    shooter: TrackedObject | None = None,
 ) -> TrackedObject | None:
+    # YOLO sometimes labels the shooter "goalkeeper"; he cannot keep his own shot.
+    if shooter is not None:
+        players = tuple(
+            item
+            for item in players
+            if item is not shooter
+            and (shooter.track_id is None or item.track_id != shooter.track_id)
+        )
     labeled = [item for item in players if item.object_type == "goalkeeper"]
     if attacking_team:
         labeled = [item for item in labeled if item.team != attacking_team] or labeled
@@ -865,7 +912,7 @@ def _xg_raw_from_frame(
     observed = len(players)
     viewed = _attack_view_action(action)
     location = (viewed.x, viewed.y) if viewed.x is not None and viewed.y is not None else None
-    keeper = infer_goalkeeper(players, attacking_team=attacking_yolo_team)
+    keeper = infer_goalkeeper(players, attacking_team=attacking_yolo_team, shooter=shooter)
     if attacking_yolo_team:
         foes = [item for item in players if item.team and item.team != attacking_yolo_team]
         allies = [item for item in players if item.team == attacking_yolo_team]
@@ -965,7 +1012,7 @@ def score_attack_with_observations(
             if shooter is not None and shooter.team
             else mapping.get(terminal_action.actor_team_id or "")
         )
-        keeper = infer_goalkeeper(oriented, attacking_team=attacking)
+        keeper = infer_goalkeeper(oriented, attacking_team=attacking, shooter=shooter)
         extras.update(
             _yolo_spatial_extras(
                 terminal_action,

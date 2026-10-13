@@ -17,6 +17,7 @@ def event_to_observed_action_v2(
     team_mapping: Mapping[str, str] | None = None,
     replay_status: Literal["live", "replay", "unknown"] = "unknown",
     index: int = 0,
+    team_left_to_right: Mapping[str, bool] | None = None,
 ) -> ObservedActionV2:
     """Convert a legacy event without promoting its xG or heuristic semantics.
 
@@ -47,6 +48,7 @@ def event_to_observed_action_v2(
         "jersey": event.jersey,
         "role": event.role,
         "outcome": event.outcome,
+        "raw_left_to_right": (team_left_to_right or {}).get(event.team),
     }
     provenance_fields.extend(name for name, value in optional_values.items() if value is not None)
     provenance = tuple(
@@ -67,6 +69,7 @@ def event_to_observed_action_v2(
         action_type=event.event_type,
         source_tier=source_tier,
         actor_team_id=actor_team_id,
+        raw_left_to_right=(team_left_to_right or {}).get(event.team),
         x=event.x,
         y=event.y,
         actor_id=event.player_id,
@@ -97,6 +100,7 @@ def event_stream_to_observed_actions_v2(
     team_mapping: Mapping[str, str] | None = None,
     replay_status: Literal["live", "replay", "unknown"] = "unknown",
     scene_cut_frames: Iterable[int] = (),
+    team_left_to_right: Mapping[str, bool] | None = None,
 ) -> tuple[ObservedActionV2, ...]:
     actions = tuple(
         event_to_observed_action_v2(
@@ -108,6 +112,7 @@ def event_stream_to_observed_actions_v2(
             team_mapping=team_mapping,
             replay_status=replay_status,
             index=index,
+            team_left_to_right=team_left_to_right,
         )
         for index, event in enumerate(events)
     )
@@ -184,6 +189,7 @@ def decode_event_stream_v2(
     replay_status: Literal["live", "replay", "unknown"] = "unknown",
     scene_cut_frames: Iterable[int] = (),
     config: FootpassAttackV2Config | None = None,
+    team_left_to_right: Mapping[str, bool] | None = None,
 ) -> tuple[tuple[ObservedActionV2, ...], AttackV2DecodeResult]:
     actions = event_stream_to_observed_actions_v2(
         events,
@@ -194,6 +200,7 @@ def decode_event_stream_v2(
         team_mapping=team_mapping,
         replay_status=replay_status,
         scene_cut_frames=scene_cut_frames,
+        team_left_to_right=team_left_to_right,
     )
     settings = config or FootpassAttackV2Config(
         fps=fps,

@@ -71,6 +71,8 @@ ACTION_LABELS = {
     "shot_attempt": "Dứt điểm",
     "header": "Đánh đầu",
     "headed_attempt": "Đánh đầu về cầu môn",
+    "headed_shot": "Đánh đầu về cầu môn",
+    "shot_candidate": "Sút (chưa xác nhận)",
     "tackle": "Tranh bóng",
     "block": "Cản phá",
     "forced_goal_line_out": "Ép bóng ra ngoài cuối sân",
@@ -253,14 +255,19 @@ _KEEP_ON_SIDE = frozenset(
 _DEFENSIVE_TOUCH = frozenset({"block", "tackle"})
 
 
+def _is_observed_action(item: object) -> bool:
+    # Streamlit hot reload can leave two ObservedActionV2 classes alive.
+    return hasattr(item, "timestamp_sec") and hasattr(item, "action_type")
+
+
 def _event_time(item: Event | ObservedActionV2) -> float:
-    if isinstance(item, ObservedActionV2):
+    if _is_observed_action(item):
         return float(item.timestamp_sec)
     return float(item.timestamp)
 
 
 def _event_action(item: Event | ObservedActionV2) -> str:
-    if isinstance(item, ObservedActionV2):
+    if _is_observed_action(item):
         return item.action_type
     return item.event_type
 
@@ -389,11 +396,11 @@ def pitch_event_views(
     attack_relative: bool = True,
 ) -> tuple[PitchEventView, ...]:
     prepared: list[Event | ObservedActionV2]
-    actions = [item for item in items if isinstance(item, ObservedActionV2)]
+    actions = [item for item in items if _is_observed_action(item)]
     if attack_relative and actions:
         remapped = actions_in_attack_view(tuple(actions))
         iterator = iter(remapped)
-        prepared = [next(iterator) if isinstance(item, ObservedActionV2) else item for item in items]
+        prepared = [next(iterator) if _is_observed_action(item) else item for item in items]
     else:
         prepared = list(items)
     aligned = aligned_event_xy(prepared)
@@ -402,12 +409,12 @@ def pitch_event_views(
         if x is None or y is None:
             continue
         shown = replace(item, x=x, y=y)
-        if mirrored and shown.end_x is not None:
+        if mirrored and getattr(shown, "end_x", None) is not None:
             shown = replace(shown, end_x=PITCH_LENGTH - float(shown.end_x))
         index = len(views) + 1
-        if isinstance(shown, ObservedActionV2):
+        if _is_observed_action(shown):
             view = _view_from_action(index, shown)
-        elif isinstance(shown, Event):
+        elif hasattr(shown, "event_type"):
             view = _view_from_event(index, shown)
         else:
             raise TypeError(f"unsupported pitch event type: {type(shown)!r}")

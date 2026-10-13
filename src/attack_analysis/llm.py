@@ -248,6 +248,8 @@ class DeterministicEvidenceClient(LLMClient):
                 f"{buildup['assist_type']} {float(assist.get('dt_sec') or 0):.1f}s trước dứt điểm"
             )
         spatial_clause = f" Freeze-frame: {', '.join(spatial_bits)}." if spatial_bits else ""
+        if bundle.attack.goals:
+            spatial_clause += " Cú dứt điểm thành bàn."
         claims = (
             EvidenceClaim(
                 text=f"Chance quality {chance}; xG-v2 {xg_text}.",
