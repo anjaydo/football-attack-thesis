@@ -232,6 +232,14 @@ ATTACK_TERMINAL_ALLOWLIST = frozenset(
         TerminalType.FORCED_GOAL_LINE_OUT,
     }
 )
+# A left-censored start (restart after an observation gap, penalty, direct free
+# kick) still ends in a fully observed attempt; only the end must be observed.
+ATTACK_QUALIFYING_STATUSES = frozenset(
+    {
+        SequenceStatus.COMPLETE,
+        SequenceStatus.LEFT_CENSORED,
+    }
+)
 
 FORCED_GOAL_LINE_OUT_CAUSES = frozenset(
     {
@@ -1019,8 +1027,8 @@ class AttackSequenceV2:
     def validate(self, *, expected_id: str | None = None) -> None:
         if self.schema_version != ATTACK_V2_SCHEMA_VERSION:
             raise ValueError(f"schema_version must be {ATTACK_V2_SCHEMA_VERSION}")
-        if self.possession.status is not SequenceStatus.COMPLETE:
-            raise ValueError("only complete possessions can become attacks")
+        if self.possession.status not in ATTACK_QUALIFYING_STATUSES:
+            raise ValueError("only possessions with an observed end can become attacks")
         if self.possession.terminal is None:
             raise ValueError("an attack requires a terminal")
         if self.possession.terminal.terminal_type not in ATTACK_TERMINAL_ALLOWLIST:

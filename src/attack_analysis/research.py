@@ -148,6 +148,7 @@ class EvidenceBundle:
     limitations: tuple[str, ...] = ()
     spatial_context: dict[str, Any] | None = None
     xg_raw: dict[str, Any] | None = None
+    sequence_context: dict[str, Any] | None = None
 
     @property
     def downstream_ready(self) -> bool:
@@ -180,6 +181,8 @@ class EvidenceBundle:
             payload["spatial_context"] = dict(self.spatial_context)
         if self.xg_raw:
             payload["xg_raw"] = dict(self.xg_raw)
+        if self.sequence_context:
+            payload["sequence_context"] = dict(self.sequence_context)
         return payload
 
     @classmethod
@@ -195,6 +198,9 @@ class EvidenceBundle:
                 dict(data["spatial_context"]) if data.get("spatial_context") else None
             ),
             xg_raw=dict(data["xg_raw"]) if data.get("xg_raw") else None,
+            sequence_context=(
+                dict(data["sequence_context"]) if data.get("sequence_context") else None
+            ),
         )
 
 

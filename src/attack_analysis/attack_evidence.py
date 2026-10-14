@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .attack_features import build_attack_features
-from .footpass import load_footpass_freeze_frame
+from .footpass import load_footpass_freeze_frame, possession_relative_position
 from .fusion import FusedXGResult, score_attack_with_observations
-from .models import AttackSequence, AttackSequenceV2, Event, TerminalType
+from .models import PITCH_LENGTH, PITCH_WIDTH, AttackSequence, AttackSequenceV2, Event, TerminalType
 from .observations import FrameObservation
 from .quality import read_observations_jsonl
 from .research import BenchmarkRecord, EvidenceBundle
@@ -15,6 +15,12 @@ from .xg_v2 import ConfirmedXGRecordV2, TrainedXGModelV2, load_trained_xg_v2_mod
 
 
 XG_V2_DEFAULT_RELATIVE = Path("models") / "xg-v2.joblib"
+PITCH_CENTRE_Y = PITCH_WIDTH / 2.0
+PENALTY_BOX_X = PITCH_LENGTH - 16.5
+PENALTY_BOX_HALF_WIDTH = 20.16
+CENTRAL_HALF_WIDTH = 9.16
+FINAL_THIRD_X = PITCH_LENGTH * 2.0 / 3.0
+MIDDLE_THIRD_X = PITCH_LENGTH / 3.0
 
 
 @dataclass(frozen=True)
@@ -73,7 +79,12 @@ class AttackEvidenceBundle:
             "evidence_ids": sorted(self.evidence_ids()),
         }
 
-    def as_legacy_bundle(self) -> EvidenceBundle:
+    def as_legacy_bundle(
+        self,
+        *,
+        shot_outcome: str | None = None,
+        outcome_source: str | None = None,
+    ) -> EvidenceBundle:
         """Compatibility adapter so existing tool/verify_claims contracts still work."""
 
         preview = _attack_to_preview_sequence(self.attack)
@@ -86,6 +97,12 @@ class AttackEvidenceBundle:
             xg_max=xg_value,
             evidence_ids=tuple(features.evidence_ids) + extra_ids,
         )
+        if shot_outcome == "goal":
+            features = replace(
+                features,
+                goals=max(1, features.goals),
+                shots_on_target=max(1, features.shots_on_target),
+            )
         spatial = None
         xg_raw = None
         if self.fusion is not None:
@@ -104,7 +121,194 @@ class AttackEvidenceBundle:
             limitations=self.limitations,
             spatial_context=spatial,
             xg_raw=xg_raw,
+            sequence_context=sequence_timeline(
+                self.attack,
+                shot_outcome=shot_outcome,
+                outcome_source=outcome_source,
+            ),
         )
+
+
+def _zone(x: float | None, y: float | None) -> str | None:
+    if x is None:
+        return None
+    if x >= PENALTY_BOX_X and (y is None or abs(y - PITCH_CENTRE_Y) <= PENALTY_BOX_HALF_WIDTH):
+        return "penalty_box"
+    if x >= FINAL_THIRD_X:
+        return "final_third"
+    if x >= MIDDLE_THIRD_X:
+        return "middle_third"
+    return "defensive_third"
+
+
+def _channel(y: float | None) -> str | None:
+    if y is None:
+        return None
+    offset = abs(y - PITCH_CENTRE_Y)
+    if offset <= CENTRAL_HALF_WIDTH:
+        return "central"
+    if offset <= PENALTY_BOX_HALF_WIDTH:
+        return "half_space"
+    return "wide"
+
+
+def sequence_timeline(
+    attack: AttackSequenceV2,
+    *,
+    shot_outcome: str | None = None,
+    outcome_source: str | None = None,
+) -> dict[str, object]:
+    """Ordered, pre-interpreted event timeline for the language model.
+
+    Coordinates are in the attacking team's view (x=105 is the goal being
+    attacked) and zones/channels are computed here so the model never has to
+    infer geometry from raw numbers.
+    """
+
+    possession = attack.possession
+    team = attack.team_id
+    terminal_id = attack.terminal.action_id
+    start = possession.start_sec
+    events: list[dict[str, object]] = []
+    previous_x: float | None = None
+    box_entry: dict[str, object] | None = None
+    biggest_gain: dict[str, object] | None = None
+    for step, action in enumerate(possession.actions, start=1):
+        x, y = possession_relative_position(
+            action.x,
+            action.y,
+            actor_team_id=action.actor_team_id,
+            possession_team_id=team,
+        )
+        side = (
+            "unknown"
+            if not action.actor_team_id
+            else "attacking" if action.actor_team_id == team else "opponent"
+        )
+        gain = None
+        if side == "attacking" and x is not None:
+            if previous_x is not None:
+                gain = round(x - previous_x, 1)
+            previous_x = x
+        zone = _zone(x, y)
+        item: dict[str, object] = {
+            "step": step,
+            "evidence_id": action.action_id,
+            "t_sec": round(action.timestamp_sec - start, 1),
+            "action": (
+                attack.terminal.terminal_type.value if action.action_id == terminal_id else action.action_type
+            ),
+            "team": side,
+            "x": None if x is None else round(x, 1),
+            "y": None if y is None else round(y, 1),
+            "zone": zone,
+            "channel": _channel(y),
+            "forward_gain_m": gain,
+        }
+        if action.jersey is not None:
+            item["jersey"] = action.jersey
+        if action.outcome:
+            item["outcome"] = action.outcome
+        if action.action_id == terminal_id:
+            item["terminal"] = True
+        events.append(item)
+        if side == "attacking" and zone == "penalty_box" and box_entry is None:
+            box_entry = {"step": step, "t_sec": item["t_sec"], "evidence_id": action.action_id}
+        if gain is not None and gain > 0 and (biggest_gain is None or gain > float(biggest_gain["forward_gain_m"])):
+            biggest_gain = {"step": step, "forward_gain_m": gain, "evidence_id": action.action_id}
+
+    terminal_step = next((int(item["step"]) for item in events if item.get("terminal")), None)
+    key_moments = _key_moments(events, biggest_gain, terminal_step, possession.status.value)
+    attacking = [item for item in events if item["team"] == "attacking"]
+    counts: dict[str, int] = {}
+    for item in attacking:
+        counts[str(item["action"])] = counts.get(str(item["action"]), 0) + 1
+    first = events[0] if events else None
+    status = possession.status.value
+    return {
+        "reading_note": (
+            "events are in time order; x/y are in the attacking team's view (x=105 is the goal attacked); "
+            "zone/channel/forward_gain_m are precomputed"
+        ),
+        "sequence_status": status,
+        "start": {
+            "observed_from_beginning": status == "complete",
+            "note": (
+                "build-up before the first event was not observed (restart, set piece or camera gap)"
+                if status == "left_censored"
+                else "possession start observed"
+            ),
+            "first_event": None if first is None else {
+                key: first[key] for key in ("step", "evidence_id", "action", "team", "zone")
+            },
+        },
+        "duration_sec": round(possession.end_sec - possession.start_sec, 1),
+        "key_moments": key_moments,
+        "events": events,
+        "attacking_action_counts": counts,
+        "opponent_touches": sum(1 for item in events if item["team"] == "opponent"),
+        "penalty_box_entry": box_entry,
+        "largest_forward_gain": biggest_gain,
+        "terminal": {
+            "type": attack.terminal.terminal_type.value,
+            "evidence_id": terminal_id,
+            "body_part": attack.terminal.body_part,
+            "zone": next((item["zone"] for item in events if item.get("terminal")), None),
+            "channel": next((item["channel"] for item in events if item.get("terminal")), None),
+        },
+        "shot_outcome": shot_outcome or "unknown",
+        "shot_outcome_source": outcome_source if shot_outcome else None,
+    }
+
+
+_ZONE_RANK = {"defensive_third": 0, "middle_third": 1, "final_third": 2, "penalty_box": 3}
+
+
+def _key_moments(
+    events: list[dict[str, object]],
+    biggest_gain: dict[str, object] | None,
+    terminal_step: int | None,
+    status: str,
+) -> list[dict[str, object]]:
+    """Authoritative step-by-step highlights so the model does not have to locate them itself."""
+
+    moments: list[dict[str, object]] = []
+
+    def add(item: dict[str, object], moment: str, **detail: object) -> None:
+        moments.append(
+            {
+                "step": item["step"],
+                "evidence_id": item["evidence_id"],
+                "moment": moment,
+                "action": item["action"],
+                "team": item["team"],
+                "zone": item["zone"],
+                "channel": item["channel"],
+                **detail,
+            }
+        )
+
+    if events:
+        add(events[0], "first_observed_event" if status == "left_censored" else "possession_start")
+    furthest = _ZONE_RANK.get(str(events[0]["zone"]), -1) if events else -1
+    for item in events[1:]:
+        if item["team"] != "attacking":
+            continue
+        rank = _ZONE_RANK.get(str(item["zone"]), -1)
+        if rank > furthest:
+            furthest = rank
+            add(item, f"first_entry_{item['zone']}")
+    for item in events:
+        step = int(item["step"])
+        if biggest_gain is not None and step == biggest_gain["step"]:
+            add(item, "largest_forward_gain", forward_gain_m=biggest_gain["forward_gain_m"])
+        if item["team"] == "attacking" and item["action"] == "cross":
+            add(item, "cross")
+        if item["team"] == "opponent":
+            add(item, "opponent_touch_after_terminal" if terminal_step and step > terminal_step else "opponent_touch")
+        if item.get("terminal"):
+            add(item, "terminal")
+    return sorted(moments, key=lambda moment: int(moment["step"]))
 
 
 def default_team_mapping(attack: AttackSequenceV2) -> dict[str, str]:

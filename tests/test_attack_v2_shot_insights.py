@@ -29,7 +29,8 @@ class AttackV2ShotInsightsTests(unittest.TestCase):
             [
                 _action(0, "pass", "A"),
                 _action(2, "shot", "A"),
-                _action(10, "shot", "A"),
+                _action(10, "pass", "A", qualifiers=("replay_status_unknown",)),
+                _action(11, "shot", "A", qualifiers=("replay_status_unknown",)),
             ]
         )
         insights = build_shot_insights(

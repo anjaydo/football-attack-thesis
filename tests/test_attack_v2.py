@@ -182,16 +182,20 @@ class AttackV2ModelTests(unittest.TestCase):
         )
         self.assertTrue(terminal.qualifies_as_attack)
 
-    def test_censored_possession_can_never_be_attack(self) -> None:
+    def test_only_possessions_with_an_observed_end_can_be_attacks(self) -> None:
         decoded = decode_footpass_attack_v2(
             [_action(0, "pass", "A"), _action(20, "shot", "A")],
             FootpassAttackV2Config(max_observation_gap_sec=4),
         )
-        shot_possession = decoded.possessions[-1]
+        open_possession, shot_possession = decoded.possessions
+        self.assertEqual(open_possession.status, SequenceStatus.RIGHT_CENSORED)
+        self.assertIsNone(qualify_attack_v2(open_possession))
+        with self.assertRaisesRegex(ValueError, "observed end"):
+            AttackSequenceV2(open_possession)
+
         self.assertEqual(shot_possession.status, SequenceStatus.LEFT_CENSORED)
-        self.assertIsNone(qualify_attack_v2(shot_possession))
-        with self.assertRaisesRegex(ValueError, "only complete possessions"):
-            AttackSequenceV2(shot_possession)
+        self.assertIsNotNone(qualify_attack_v2(shot_possession))
+        self.assertEqual([item.possession for item in decoded.attacks], [shot_possession])
 
     def test_possession_value_has_no_attack_flag_and_round_trips(self) -> None:
         value = PossessionValueV2(
@@ -245,19 +249,19 @@ class FootpassAttackV2DecoderTests(unittest.TestCase):
         self.assertEqual(len(explicit.attacks), 1)
         self.assertEqual(explicit.attacks[0].terminal.terminal_type, TerminalType.HEADED_ATTEMPT)
 
-    def test_terminal_without_established_control_is_left_censored(self) -> None:
+    def test_terminal_without_established_control_is_left_censored_attack(self) -> None:
         lone_shot = decode_footpass_attack_v2([_action(1, "shot", "A")])
         contested_then_shot = decode_footpass_attack_v2(
             [_action(1, "tackle", "B"), _action(2, "shot", "A")]
         )
 
-        self.assertEqual(len(lone_shot.attacks), 0)
         self.assertEqual(lone_shot.possessions[0].status, SequenceStatus.LEFT_CENSORED)
-        self.assertEqual(len(contested_then_shot.attacks), 0)
+        self.assertEqual(len(lone_shot.attacks), 1)
         self.assertEqual(
             contested_then_shot.possessions[0].status,
             SequenceStatus.LEFT_CENSORED,
         )
+        self.assertEqual(len(contested_then_shot.attacks), 1)
 
     def test_unknown_replay_status_cannot_form_complete_attack(self) -> None:
         result = decode_footpass_attack_v2(
@@ -278,11 +282,11 @@ class FootpassAttackV2DecoderTests(unittest.TestCase):
                 _action(4, "shot", "A"),
             ]
         )
-        self.assertEqual(len(result.attacks), 0)
         self.assertEqual(
             [item.status for item in result.possessions],
             [SequenceStatus.RIGHT_CENSORED, SequenceStatus.LEFT_CENSORED],
         )
+        self.assertEqual([item.possession for item in result.attacks], [result.possessions[1]])
 
     def test_shot_and_defensive_block_in_same_cluster_form_one_attack(self) -> None:
         result = decode_footpass_attack_v2(
@@ -374,7 +378,7 @@ class FootpassAttackV2DecoderTests(unittest.TestCase):
             SequenceStatus.RIGHT_CENSORED,
             SequenceStatus.LEFT_CENSORED,
         ])
-        self.assertEqual(len(result.attacks), 0)
+        self.assertEqual([item.possession for item in result.attacks], [result.possessions[1]])
 
     def test_replay_actions_are_excluded_from_live_decoding(self) -> None:
         replay_shot = _action(1, "shot", "A", replay=True)

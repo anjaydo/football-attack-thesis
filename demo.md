@@ -35,7 +35,7 @@ Chỉ vào hai mode:
 
 ## 1:00–2:30 — Chọn một đợt tấn công
 
-Trong tab **FOOTPASS analysis**:
+Trong tab **Validation Analysis**:
 
 1. Chọn `footpass_oracle`.
 2. Chọn match/half `game_18_H1`.

@@ -33,6 +33,7 @@ SHOT_OUTCOME_LABELS = {
     "blocked": "Bị chặn",
     "off_target": "Ra ngoài",
     "woodwork": "Trúng khung thành",
+    "no_goal": "Không thành bàn",
     "unknown": "Chưa rõ",
 }
 
@@ -99,6 +100,7 @@ def resolve_shot_outcome(
     possession: PossessionSequenceV2,
     *,
     gold_index: GoldOutcomeIndex | None = None,
+    scoreboard_outcomes: Mapping[str, tuple[str, str]] | None = None,
 ) -> tuple[str | None, str | None]:
     """Resolve display outcome with explicit provenance priority."""
 
@@ -106,6 +108,8 @@ def resolve_shot_outcome(
         outcome, source = gold_index.lookup(possession)
         if outcome is not None:
             return outcome, source
+    if scoreboard_outcomes and possession.possession_id in scoreboard_outcomes:
+        return scoreboard_outcomes[possession.possession_id]
     terminal = possession.terminal
     if terminal is not None and terminal.outcome:
         return terminal.outcome, "terminal_event"

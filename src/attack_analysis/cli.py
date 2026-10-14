@@ -52,6 +52,12 @@ from .footpass import (
     segment_footpass_attacks,
 )
 from .attack_v2 import FootpassAttackV2Config, decode_footpass_attack_v2
+from .scoreboard_goals import (
+    ScoreboardGoalIndex,
+    match_truth_from_restarts,
+    match_truth_from_readings,
+    read_scoreboard_readings,
+)
 from .action_spotting_v2 import OperatingPointMeasurement
 from .release_control import (
     ReleaseComponentHashes,
@@ -124,6 +130,7 @@ COMMANDS = {
     "train-ball-model",
     "footpass-ingest",
     "audit-footpass-v2",
+    "build-scoreboard-goals",
     "evaluate-footpass-actions",
     "evaluate-attack-v2",
     "freeze-attack-v2-release",
@@ -453,6 +460,23 @@ def build_parser() -> argparse.ArgumentParser:
     footpass_audit_parser.add_argument("tactical_h5", type=Path)
     footpass_audit_parser.add_argument("video_root", type=Path)
     footpass_audit_parser.add_argument("output", type=Path)
+
+    scoreboard_goals_parser = subparsers.add_parser(
+        "build-scoreboard-goals",
+        help="Goal times per FOOTPASS match from the video score bug (event restart fallback without a score bug)",
+    )
+    scoreboard_goals_parser.add_argument(
+        "playbyplay",
+        type=Path,
+        nargs="+",
+        help="playbyplay JSON files; a sibling ../data/<split>_tactical_data.h5 is used for the restart fallback",
+    )
+    scoreboard_goals_parser.add_argument("--readings-dir", type=Path, default=Path("runs/goal-truth"))
+    scoreboard_goals_parser.add_argument("--video-root", type=Path)
+    scoreboard_goals_parser.add_argument("--exclude", default="game_0,game_36,game_50")
+    scoreboard_goals_parser.add_argument(
+        "--output", type=Path, default=Path("data/footpass-scoreboard-goals.json")
+    )
 
     attack_v2_evaluation_parser = subparsers.add_parser(
         "evaluate-attack-v2",
@@ -1132,6 +1156,36 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    elif args.command == "build-scoreboard-goals":
+        excluded = {item for item in args.exclude.split(",") if item}
+        index = ScoreboardGoalIndex.load(args.output)
+        matches = dict(index.matches)
+        for playbyplay in args.playbyplay:
+            split = playbyplay.stem.rsplit("_", 1)[-1]
+            tactical = playbyplay.parent.parent / "data" / f"{split}_tactical_data.h5"
+            keys = footpass_match_keys(playbyplay)
+            for match_id in sorted({key.rsplit("_H", 1)[0] for key in keys} - excluded):
+                readings = read_scoreboard_readings(match_id, args.readings_dir, args.video_root)
+                if readings is None:
+                    print(f"{match_id}: no scoreboard readings, skipped", flush=True)
+                    continue
+                truth = match_truth_from_readings(match_id, readings)
+                if truth is None:
+                    halves = [
+                        prepare_footpass_actions_v2(
+                            playbyplay,
+                            match_key=key,
+                            source="oracle",
+                            tactical_h5=tactical if tactical.is_file() else None,
+                        ).actions
+                        for key in keys
+                        if key.rsplit("_H", 1)[0] == match_id
+                    ]
+                    truth = match_truth_from_restarts(match_id, halves)
+                matches[match_id] = truth
+                print(f"{match_id}: {truth.source} goals={len(truth.goal_times_sec)} final={truth.final_score}", flush=True)
+        ScoreboardGoalIndex(matches).save(args.output)
+        result = {"output": str(args.output), "matches": len(matches)}
     elif args.command == "audit-footpass-v2":
         result = audit_footpass_v2(
             args.playbyplay,

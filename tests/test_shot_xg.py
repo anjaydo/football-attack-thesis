@@ -21,6 +21,7 @@ def _action(
     *,
     x: float | None = 90.0,
     y: float | None = 34.0,
+    qualifiers: tuple[str, ...] = (),
 ) -> ObservedActionV2:
     return ObservedActionV2(
         match_id="game_18",
@@ -33,6 +34,7 @@ def _action(
         possession_team_id=team,
         x=x,
         y=y,
+        qualifiers=qualifiers,
         evidence_ids=(f"ev-{second}-{action_type}",),
     )
 
@@ -110,8 +112,8 @@ class ShotXGTests(unittest.TestCase):
         decoded = decode_footpass_attack_v2(
             [
                 _action(1.0, "pass", "A", x=40.0),
-                _action(20.0, "pass", "A", x=70.0),
-                _action(21.0, "shot", "A", x=92.0),
+                _action(20.0, "pass", "A", x=70.0, qualifiers=("replay_status_unknown",)),
+                _action(21.0, "shot", "A", x=92.0, qualifiers=("replay_status_unknown",)),
             ]
         )
         censored = [

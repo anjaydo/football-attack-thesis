@@ -20,27 +20,36 @@ Hoặc `attack-analysis serve-demo --port 8504`. Gói tối thiểu là extra `d
 | Tên | Giá trị |
 | --- | --- |
 | FOOTPASS | `<workspace>/FOOTPASS` |
-| Video (tab FOOTPASS) | `FOOTPASS_VIDEOS_DIR` (mặc định `D:\videos`), qua `VideoPathResolver` |
+| Video (tab Analysis / Validation Analysis) | `FOOTPASS_VIDEOS_DIR` (mặc định `D:\videos`), qua `VideoPathResolver` |
 | xG-v1 | `models/xg-v1.joblib` |
 | xG-v2 | `XG_V2_MODEL_PATH` hoặc `models/xg-v2.joblib` |
 | Benchmark | `data/benchmarks.jsonl` |
 | Ngưỡng event | `models/dst-thresholds-v1.json` |
 
-Không có sidebar; mọi điều khiển nằm trong 3 tab.
+Không có sidebar; mọi điều khiển nằm trong 4 tab.
 
-## Tab 1: FOOTPASS analysis
+## Tab 1: Analysis và Tab 2: Validation Analysis
+
+Hai tab dùng chung `render_footpass_analysis(split)`; key widget có tiền tố split nên hai tab giữ trạng thái riêng.
+
+| Tab | Split | Play-by-play oracle | Tactical HDF5 | Prediction registry |
+| --- | --- | --- | --- | --- |
+| Analysis | `train` (48 trận, 96 hiệp — các video dùng để train model) | `playbyplay_GT/playbyplay_train.json` | `data/train_tactical_data.h5` | Không dùng; predicted đọc `playbyplay_PRED/playbyplay_<model>_train.json` nếu đã infer |
+| Validation Analysis | `val` (game 18 / 24 / 47) | `playbyplay_GT/playbyplay_val.json` | `data/val_tactical_data.h5` | Có |
+
+Các bước dưới đây áp dụng cho cả hai tab:
 
 1. **Evidence mode:** `oracle` hoặc `predicted`.
-2. **Predicted:**
+2. **Predicted** (registry chỉ có ở Validation Analysis):
    - Selectbox **Prediction source** lấy từ `models/prediction-sources.json` (mặc định primary). Caption hiển thị id, 12 ký tự đầu SHA-256 và micro-F1 chính thức (τ = 0.15, δ = 12). File được kiểm SHA-256 trước khi dùng.
    - Registry rỗng hoặc lỗi thì quay về selectbox DST/TAAD cũ.
    - Slider ngưỡng confidence (mặc định 0.15).
    - Toggle class-aware dùng `threshold_profile` của nguồn; bật thì tên model thành `{id}_calibrated`. TAAD được ghi chú "ablation only".
-3. **Đường dẫn:** play-by-play (oracle: `playbyplay_GT/playbyplay_val.json`; predicted: đường dẫn từ registry) và tactical HDF5 (`FOOTPASS/data/val_tactical_data.h5`).
+3. **Đường dẫn:** play-by-play (oracle: `playbyplay_GT/playbyplay_<split>.json`; predicted: đường dẫn từ registry) và tactical HDF5 (`FOOTPASS/data/<split>_tactical_data.h5`).
 4. **Observation gap:** 4–15 s, mặc định 8 (gap gây censor, không tạo attack).
 5. **Phân tích hiệp:** chọn match half → `load_attack_v2_analysis` (cache). Metric: observed actions, possessions, strict Attack-v2, replay excluded.
 6. **Audit shot → Attack-v2:** bảng promoted / censored / unassigned, kết quả cú sút từ gold nếu có.
-7. **Bộ lọc sequence:** Confirmed Attack-v2, Shot terminal bị censor, All possessions.
+7. **Goal truth + bộ lọc sequence:** caption "Goal truth" cho biết số bàn trong hiệp (từ `data/footpass-scoreboard-goals.json`) và bao nhiêu bàn nằm trong danh sách Attack-v2. Bộ lọc: Confirmed Attack-v2, Attack-v2 · bàn thắng, Shot terminal bị censor, All possessions. Chuỗi ghi bàn có tiền tố `GOAL ·`; cú sút khác của trận có scoreboard được gán `Không thành bàn` (nguồn `video_scoreboard`).
 8. **Chi tiết sequence:** status, team, số action, thời lượng, terminal, kết quả cú sút; bảng timeline (frame, time, action, team, x, x_attack, jersey, replay, P(action), evidence); cảnh báo nếu median x attack-view < 52.5 (có thể lật hướng); sân tương tác Altair.
 9. **Video preview:** `st.video` mở tại giây đã đổi qua đồng hồ preview.
 10. **Cửa sổ calibration + YOLO** (mục dưới).
@@ -73,14 +82,14 @@ Không có sidebar; mọi điều khiển nằm trong 3 tab.
    - **Spatial context:** association method, track, khoảng cách GK, số đối thủ, body part; bảng field/value/source (provenance); `plot_freeze_frame` (cầu thủ, người sút, GK, build-up, pose); JSON `xg_raw`.
    - **Benchmark**, **Web context** (chỉ ngữ cảnh), **Tactical read** (structural features, claims kèm evidence id, limitations).
 
-## Tab 2: Exploratory upload
+## Tab 3: Exploratory upload
 
 - Luôn chọn video từ máy qua `st.file_uploader` (MP4/MKV/MOV, tối đa 4 GB theo `.streamlit/config.toml`); file lưu theo SHA-256 nội dung vào `runs/upload-cache`, nên chọn lại cùng file dùng lại cache. Không còn danh sách video gắn sẵn.
 - Slider số frame YOLO 25–750 (mặc định 250); chọn device.
 - `run_cached_video_pipeline(..., runs/upload-cache/vision)` với `VisionConfig(image_size=960, field_lines=True)`, tier `video_only`.
 - Luôn kết thúc bằng verdict `insufficient_evidence`: video-only không xác nhận được terminal Attack-v2.
 
-## Tab 3: Annotation
+## Tab 4: Annotation
 
 - Tải manifest gold (`attack-gold-v2.0`, tạo bằng `build-gold-manifest`).
 - Trận sắp xếp theo split; trận test có cảnh báo.

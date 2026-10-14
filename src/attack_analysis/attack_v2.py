@@ -5,6 +5,7 @@ from math import ceil
 from typing import Iterable
 
 from .models import (
+    ATTACK_QUALIFYING_STATUSES,
     ATTACK_TERMINAL_ALLOWLIST,
     ATTACK_V2_RUBRIC_VERSION,
     FORCED_GOAL_LINE_OUT_CAUSES,
@@ -452,7 +453,7 @@ def qualify_attack_v2(
     calibrated_confidence: float | None = None,
     calibration_id: str | None = None,
 ) -> AttackSequenceV2 | None:
-    if possession.status is not SequenceStatus.COMPLETE or possession.terminal is None:
+    if possession.status not in ATTACK_QUALIFYING_STATUSES or possession.terminal is None:
         return None
     if possession.terminal.terminal_type not in ATTACK_TERMINAL_ALLOWLIST:
         return None

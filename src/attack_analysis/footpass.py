@@ -250,27 +250,24 @@ def _stable_team_ids_by_direction(rows: Any, match_id: str) -> dict[int, str]:
 
     if rows is None or len(rows) == 0:
         return {}
-    # Sampling is enough because each broadcast frame normally contains all
-    # visible roster entries, and avoids a multi-million-row Counter allocation.
-    stride = max(1, len(rows) // 20_000)
-    counts: dict[int, Counter[int]] = {0: Counter(), 1: Counter()}
-    for row in rows[::stride]:
-        player_value = float(row[1])
-        direction_value = float(row[2])
-        if not isfinite(player_value) or not isfinite(direction_value):
-            continue
-        player_id = int(player_value)
-        direction = int(direction_value)
-        if direction not in counts:
-            continue
-        # The official files allocate players in roster blocks.  Retaining the
-        # hundred-series makes substitutions share one stable team identity.
-        roster_namespace = (player_id // 100) * 100 if abs(player_id) >= 100 else player_id
-        counts[direction][roster_namespace] += 1
+    import numpy as np
+
+    # Count every row: a fixed-stride sample can alias with the per-frame row
+    # layout and miss one direction entirely (game_10_H2).
+    players = np.asarray(rows[:, 1], dtype=float)
+    directions = np.asarray(rows[:, 2], dtype=float)
+    valid = np.isfinite(players) & np.isfinite(directions)
+    player_ids = players[valid].astype(np.int64)
+    direction_ids = directions[valid].astype(np.int64)
+    # The official files allocate players in roster blocks.  Retaining the
+    # hundred-series makes substitutions share one stable team identity.
+    namespaces = np.where(np.abs(player_ids) >= 100, (player_ids // 100) * 100, player_ids)
     result: dict[int, str] = {}
-    for direction, candidates in counts.items():
-        if candidates:
-            namespace = candidates.most_common(1)[0][0]
+    for direction in (0, 1):
+        selected = namespaces[direction_ids == direction]
+        if len(selected):
+            values, counts = np.unique(selected, return_counts=True)
+            namespace = int(values[int(np.argmax(counts))])
             result[direction] = f"{match_id}:roster-{namespace}"
     if len(set(result.values())) != len(result):
         raise ValueError("FOOTPASS tactical rows do not resolve to two distinct stable teams")

@@ -23,8 +23,9 @@ validated upstream vision manifest and cannot be accepted by the v2 cache.
 
 ## Locked ontology
 
-`PossessionSequenceV2` and `AttackSequenceV2` are separate objects. A complete
-attack must reference one complete possession and end with exactly one of:
+`PossessionSequenceV2` and `AttackSequenceV2` are separate objects. An attack
+must reference one possession whose end is observed (`complete` or
+`left_censored`) and end with exactly one of:
 
 - `shot_attempt`;
 - `headed_attempt`, which requires evidence of intent toward goal;
@@ -37,6 +38,13 @@ does not switch owner. A throw-in backfills an approximate ordinary out for the
 previous possession and starts the next possession. Gaps, cuts and truncated
 windows produce censoring, never a football terminal. A rebound controlled
 after a shot starts a new sequence.
+
+A left-censored possession only lacks its build-up (restart after a stoppage,
+set piece, penalty, short header sequence after a cross, first action after a
+cut); its terminal is observed, so it still qualifies. Right-censored and
+uncertain possessions never do. Requiring `complete` dropped most goals: on 12
+scoreboard-checked train matches only 17/44 scoring attempts were in the list,
+against 44/44 with the observed-end rule.
 
 The current video trajectory rule emits `shot_candidate`, not `shot`; it has no
 xG and cannot qualify an attack.
@@ -53,7 +61,8 @@ The v2 contracts live in `src/attack_analysis/models.py`:
   beneficiary, cause and evidence;
 - `PossessionSequenceV2` contains both teams' actions, state transitions,
   terminal and `complete | left_censored | right_censored | uncertain` status;
-- `AttackSequenceV2` enforces a complete possession and terminal allowlist;
+- `AttackSequenceV2` enforces an observed end (`ATTACK_QUALIFYING_STATUSES`)
+  and the terminal allowlist;
 - `PossessionValueV2` carries measurable threat components but has no
   `is_attack` flag.
 

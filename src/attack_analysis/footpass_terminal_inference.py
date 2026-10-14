@@ -28,11 +28,16 @@ class FootpassTerminalInferenceConfig:
     max_observation_gap_sec: float = 8.0
     attacking_third_x: float = 70.0
     penalty_box_x: float = PITCH_LENGTH - 16.5
+    # A live action cannot follow a real broadcast replay this quickly without a
+    # cut, so a replay flag this close to a live header is a boundary label slip.
+    replay_boundary_tolerance_sec: float = 2.0
     inference_version: str = INFERENCE_VERSION
 
     def __post_init__(self) -> None:
         if self.fps <= 0 or self.event_cluster_sec < 0 or self.max_observation_gap_sec <= 0:
             raise ValueError("fps and gap thresholds must be positive")
+        if self.replay_boundary_tolerance_sec < 0:
+            raise ValueError("replay_boundary_tolerance_sec must not be negative")
         if not 0.0 <= self.attacking_third_x <= PITCH_LENGTH:
             raise ValueError("attacking_third_x must lie on the pitch")
         if not 0.0 <= self.penalty_box_x <= PITCH_LENGTH:
@@ -179,7 +184,9 @@ def _previous_same_team_cross(
         gap = current.timestamp_sec - previous.timestamp_sec
         if gap > config.max_observation_gap_sec:
             break
-        if not _live(previous):
+        if previous.action_type == "scene_cut":
+            continue
+        if previous.replay and gap > config.replay_boundary_tolerance_sec:
             continue
         if previous.action_type == "cross" and previous.actor_team_id == team_id:
             return previous

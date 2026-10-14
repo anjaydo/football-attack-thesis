@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from abc import ABC, abstractmethod
 from dataclasses import replace
 from pathlib import Path
@@ -18,7 +19,7 @@ from .research import (
 
 
 PROMPT_VERSION = "attack-verdict-v1"
-PROMPT_VERSION_V2 = "attack-verdict-v2"
+PROMPT_VERSION_V2 = "attack-verdict-v2.3-analyst-voice"
 
 
 def describe_openai_error(error: Exception) -> str:
@@ -141,6 +142,258 @@ def conclusion_v2_json_schema() -> dict[str, Any]:
     }
 
 
+_ZONE_VI = {
+    "defensive_third": "1/3 sân nhà của đội tấn công",
+    "middle_third": "khu giữa sân",
+    "final_third": "1/3 cuối sân",
+    "penalty_box": "vòng cấm",
+}
+_CHANNEL_VI = {"central": "trung lộ", "half_space": "hành lang trong", "wide": "biên"}
+_OUTCOME_VI = {"goal": "thành bàn", "no_goal": "không thành bàn"}
+_ACTION_VI = {
+    "pass": "chuyền",
+    "drive": "dẫn bóng",
+    "cross": "tạt bóng",
+    "shot": "sút",
+    "throw_in": "ném biên",
+    "shot_attempt": "dứt điểm",
+    "headed_attempt": "đánh đầu dứt điểm",
+    "header": "đánh đầu",
+    "tackle": "tắc bóng",
+    "block": "chặn bóng",
+    "forced_goal_line_out": "buộc đối phương phá ra biên ngang",
+}
+
+
+_FIELD_VI = {
+    "left_censored": "không quan sát được đoạn đầu",
+    "complete": "quan sát trọn vẹn",
+    "sequence_status": "trạng thái chuỗi",
+    "largest_forward_gain": "bước tiến lớn nhất",
+    "forward_gain_m": "mức tiến",
+    "penalty_box_entry": "điểm vào vòng cấm",
+    "entered_penalty_box": "vào vòng cấm",
+    "opponent_touches": "số lần đối phương chạm bóng",
+    "ended_in_turnover": "mất bóng",
+    "shot_outcome_source": "nguồn kết quả",
+    "shot_outcome": "kết quả",
+    "body_part": "bộ phận dứt điểm",
+    "no_goal": "không thành bàn",
+    "xg_max": "xG cao nhất",
+    "xg_sum": "tổng xG",
+    "key_moments": "các mốc chính",
+    "first_entry": "lần đầu vào",
+    "first entry": "lần đầu vào",
+    "terminal": "pha kết thúc",
+    "xG_sum": "tổng xG",
+    "xG_max": "xG cao nhất",
+    "xG-v2": "xG",
+    "XG-v2": "xG",
+    "half-space": "hành lang trong",
+    "video_scoreboard": "bảng tỉ số trên video",
+    "video scoreboard": "bảng tỉ số trên video",
+    "event_restart": "giao bóng lại sau bàn thắng",
+    "goal": "bàn thắng",
+}
+_VIETNAMESE = {"vietnamese", "tiếng việt", "vi"}
+_LONG_DECIMAL = re.compile(r"(?<![\w.])\d+\.\d{4,}")
+_EVIDENCE_TOKEN_PATTERN = r"(?:xg:)?(?:actv2|termv2|atkv2|xgv2)_[0-9a-f]+|footpass-hdf5:[\w:.-]+"
+_EVIDENCE_PAREN = re.compile(rf"\s*\((?:evidence[_ ]ids?\s*:?\s*)?[^()]*?(?:{_EVIDENCE_TOKEN_PATTERN})[^()]*\)")
+_EVIDENCE_TOKEN = re.compile(rf"\s*\b(?:{_EVIDENCE_TOKEN_PATTERN})")
+_KEY_VALUE_PAREN = re.compile(r"\s*\([^()]*\b[a-z_/]+=(?:true|false)\b[^()]*\)", re.IGNORECASE)
+_T_EQUALS = re.compile(r"\bt\s*=\s*(\d+(?:\.\d+)?)\s*(?:giây|s)?(?!\w)")
+_DECIMAL_SECOND = re.compile(r"\bgiây(?: thứ)?\s+(\d+[.,]\d+)")
+_LABEL_PAREN = re.compile(
+    r"\s*\((?:pha kết thúc|bước tiến lớn nhất|(?:kết quả:\s*)?(?:bàn thắng|không thành bàn)"
+    r"|\d+(?:[.,]\d+)?\s+trong dữ liệu)\)|\s+trong dữ liệu là \d+(?:[.,]\d+)?",
+    re.IGNORECASE,
+)
+_DECIMAL_METRES = re.compile(r"\b(\d+[.,]\d+)\s*m\b")
+_REPEATED_WORDS = re.compile(r"\b((?:\w+\s+){0,2}\w+)(?:\s+\1\b)+")
+_SNAKE_ASSIGNMENT = re.compile(r"\b([a-z]+(?:_[a-z]+)+)\s*=\s*")
+_REPEATED_PAREN = re.compile(r"\b([^(),;]{3,}?)\s*\(\1\b([^()]*)\)", re.IGNORECASE)
+
+
+def _vietnamese_terms() -> dict[str, str]:
+    return {**_FIELD_VI, **_ZONE_VI, **_CHANNEL_VI, **_ACTION_VI}
+
+
+def _glossary(language: str) -> str:
+    if language.casefold() not in _VIETNAMESE:
+        return ""
+    terms = _vietnamese_terms()
+    return "- Vietnamese terms: " + "; ".join(f"{key} = {value}" for key, value in terms.items()) + "\n"
+
+
+def _polish_text(text: str, language: str) -> str:
+    """Strip leaked evidence IDs, round decimals and translate schema tokens in user-visible prose."""
+
+    text = _EVIDENCE_PAREN.sub("", text)
+    text = _EVIDENCE_TOKEN.sub("", text)
+    text = _KEY_VALUE_PAREN.sub("", text)
+    text = _LONG_DECIMAL.sub(lambda match: f"{float(match.group(0)):.3f}", text)
+    if language.casefold() not in _VIETNAMESE:
+        return text
+    text = _T_EQUALS.sub(lambda match: f"giây thứ {int(float(match.group(1)) + 0.5)}", text)
+    text = _DECIMAL_SECOND.sub(
+        lambda match: f"giây thứ {int(float(match.group(1).replace(',', '.')) + 0.5)}", text
+    )
+    text = _DECIMAL_METRES.sub(lambda match: f"{int(float(match.group(1).replace(',', '.')) + 0.5)} m", text)
+    text = _SNAKE_ASSIGNMENT.sub(lambda match: f"{match.group(1)}: ", text)
+    for token in sorted(_vietnamese_terms(), key=len, reverse=True):
+        text = re.sub(rf"\b{re.escape(token)}\b", _vietnamese_terms()[token], text)
+    text = _REPEATED_PAREN.sub(lambda match: match.group(1) + match.group(2), text)
+    text = _LABEL_PAREN.sub("", text)
+    return _REPEATED_WORDS.sub(lambda match: match.group(1), text)
+
+
+_ZONE_AREA_VI = {
+    "defensive_third": "phần sân nhà",
+    "middle_third": "khu trung tuyến",
+    "final_third": "1/3 cuối sân",
+    "penalty_box": "vòng cấm",
+}
+_CHANNEL_AREA_VI = {"central": "trung lộ", "half_space": "hành lang trong", "wide": "hành lang biên"}
+_TERMINAL_NOUN_VI = {"shot_attempt": "cú dứt điểm", "headed_attempt": "pha đánh đầu"}
+_OUTCOME_SOURCE_VI = {
+    "video_scoreboard": " (xác nhận qua bảng tỉ số)",
+    "event_restart": " (xác nhận qua pha giao bóng lại)",
+}
+
+
+def _xg_band_vi(xg: float) -> str:
+    if xg >= 0.25:
+        return "cơ hội lớn"
+    if xg >= 0.10:
+        return "nửa cơ hội"
+    return "cơ hội khó"
+
+
+def _timeline_read(context: dict[str, Any], xg: float | None = None) -> str:
+    """Deterministic Vietnamese narrative in the match-analyst voice described in the skill."""
+
+    events = [item for item in context.get("events") or () if isinstance(item, dict)]
+    if not events:
+        return ""
+    by_step = {int(item["step"]): item for item in events}
+    terminal = next((item for item in events if item.get("terminal")), events[-1])
+    terminal_step = int(terminal["step"])
+    outcome = str(context.get("shot_outcome") or "unknown")
+
+    def who(item: dict[str, Any]) -> str:
+        return f"số {item['jersey']}" if item.get("jersey") is not None else "đội tấn công"
+
+    def verb(item: dict[str, Any]) -> str:
+        return _ACTION_VI.get(str(item.get("action")), str(item.get("action")))
+
+    def place(item: dict[str, Any]) -> str:
+        zone = _ZONE_AREA_VI.get(str(item.get("zone")), "")
+        channel = _CHANNEL_AREA_VI.get(str(item.get("channel")), "")
+        return ", ".join(value for value in (zone, channel) if value) or "vị trí chưa rõ"
+
+    def at(item: dict[str, Any]) -> str:
+        return f"Ở giây thứ {float(item.get('t_sec') or 0):.0f}"
+
+    moments: dict[int, set[str]] = {}
+    gains: dict[int, float] = {}
+    for moment in context.get("key_moments") or ():
+        step = int(moment["step"])
+        moments.setdefault(step, set()).add(str(moment["moment"]))
+        if moment.get("forward_gain_m") is not None:
+            gains[step] = float(moment["forward_gain_m"])
+
+    first = events[0]
+    lead = "Bàn thắng" if outcome == "goal" else (
+        "Cú dứt điểm" if terminal.get("action") in _TERMINAL_NOUN_VI else "Đợt tấn công"
+    )
+    gain_step = next(iter(gains), None)
+    route = (
+        f" qua {_CHANNEL_AREA_VI[str(by_step[gain_step]['channel'])]}"
+        if gain_step is not None and str(by_step[gain_step].get("channel")) in _CHANNEL_AREA_VI
+        else ""
+    )
+    ending = _TERMINAL_NOUN_VI.get(str(terminal.get("action")), f"pha {verb(terminal)}")
+    parts = [
+        f"{lead} đến từ một đợt lên bóng kéo dài khoảng {float(context.get('duration_sec') or 0):.0f} giây, "
+        f"đi từ {_ZONE_AREA_VI.get(str(first.get('zone')), 'vị trí chưa rõ')}{route} "
+        f"rồi kết thúc bằng {ending} ở {place(terminal)}."
+    ]
+    if context.get("sequence_status") == "left_censored":
+        parts.append(
+            "Đoạn triển khai trước đó không có trong dữ liệu; diễn biến quan sát được bắt đầu khi "
+            f"{who(first)} {verb(first)} ở {place(first)}."
+        )
+    else:
+        parts.append(f"Đợt bóng bắt đầu khi {who(first)} {verb(first)} ở {place(first)}.")
+
+    last_told = int(first["step"])
+    for step in sorted(moments):
+        item = by_step.get(step)
+        kinds = moments[step]
+        if item is None or step == last_told or step >= terminal_step:
+            continue
+        if item.get("team") == "opponent":
+            parts.append(f"{at(item)}, đối phương có một pha {verb(item)} nhưng không giải toả được bóng.")
+            last_told = step
+            continue
+        linking = sum(1 for other in events if last_told < int(other["step"]) < step and other.get("team") == "attacking")
+        prefix = f"Sau {linking} nhịp chạm nối tiếp, ở" if linking >= 2 else at(item)
+        if not prefix.startswith("Ở"):
+            sentence = f"{prefix} giây thứ {float(item.get('t_sec') or 0):.0f}, {who(item)} {verb(item)}"
+        else:
+            sentence = f"{prefix}, {who(item)} {verb(item)}"
+        if "cross" in kinds:
+            sentence += f" từ {_CHANNEL_AREA_VI.get(str(item.get('channel')), 'biên')}"
+        entries = [kind for kind in kinds if kind.startswith("first_entry_")]
+        if entries:
+            zone = entries[0].removeprefix("first_entry_")
+            if item.get("action") in {"shot", "header"}:
+                sentence += f" ngay trong {_ZONE_AREA_VI.get(zone, zone)}"
+            elif zone == "penalty_box":
+                sentence += " đưa bóng vào vòng cấm"
+            else:
+                sentence += f" đưa bóng lên {_ZONE_AREA_VI.get(zone, zone)}"
+        if step in gains:
+            sentence += f" — quãng tiến dài nhất của cả đợt, khoảng {gains[step]:.0f} m"
+        parts.append(sentence + ".")
+        last_told = step
+
+    finish = f"{at(terminal)}, {who(terminal)} {verb(terminal)} ở {place(terminal)}"
+    if "first_entry_penalty_box" in moments.get(terminal_step, set()):
+        finish += " ngay trong lần đầu bóng vào vòng cấm"
+    parts.append(finish + ".")
+
+    source = _OUTCOME_SOURCE_VI.get(str(context.get("shot_outcome_source")), "")
+    if outcome == "goal":
+        parts.append(f"Bóng đi vào lưới{source}.")
+    elif outcome == "no_goal":
+        parts.append(f"Cú dứt điểm không thành bàn{source}.")
+    if xg is not None:
+        sentence = f"Theo mô hình xG, đây là {_xg_band_vi(xg)} (xG {xg:.2f})"
+        if outcome == "goal" and xg < 0.25:
+            sentence += " — pha dứt điểm vượt kỳ vọng"
+        elif outcome == "no_goal" and xg >= 0.25:
+            sentence += " — một cơ hội lớn bị bỏ lỡ"
+        parts.append(sentence + ".")
+
+    if gain_step is not None and gains[gain_step] >= 20 and gain_step in by_step:
+        item = by_step[gain_step]
+        parts.append(
+            f"Điểm mấu chốt là pha {verb(item)} của {who(item)} ở giây thứ {float(item.get('t_sec') or 0):.0f}: "
+            f"một nhịp chạm cho quãng tiến khoảng {gains[gain_step]:.0f} m, kéo cả đợt bóng lên "
+            f"{_ZONE_AREA_VI.get(str(item.get('zone')), 'phía trên')}."
+        )
+    elif any("cross" in kinds for kinds in moments.values()):
+        step = next(step for step, kinds in sorted(moments.items()) if "cross" in kinds)
+        parts.append(
+            f"Điểm mấu chốt là quả tạt ở giây thứ {float(by_step[step].get('t_sec') or 0):.0f}, "
+            "đưa bóng thẳng vào khu vực dứt điểm."
+        )
+    elif len(events) <= 3:
+        parts.append(f"Đợt bóng ngắn và trực diện: chỉ {len(events)} nhịp chạm từ lúc quan sát đến khi dứt điểm.")
+    return " ".join(parts)
+
+
 def _chance_quality_from_xg(xg: float | None) -> str:
     if xg is None:
         return "unknown"
@@ -239,16 +492,20 @@ class DeterministicEvidenceClient(LLMClient):
         xg_text = "unknown" if xg is None else f"{xg:.3f} (research_only)"
         spatial_bits = []
         if gk_distance is not None:
-            spatial_bits.append(f"thủ môn cách {float(gk_distance):.1f} m")
+            spatial_bits.append(f"thủ môn đứng cách người sút {float(gk_distance):.0f} m")
         if spatial.get("defenders_in_box") is not None:
-            spatial_bits.append(f"{int(spatial['defenders_in_box'])} đối phương trong vòng cấm")
+            spatial_bits.append(f"có {int(spatial['defenders_in_box'])} cầu thủ đối phương trong vòng cấm")
         if buildup.get("assist_type"):
             assist = dict(buildup.get("assist") or {})
-            spatial_bits.append(
-                f"{buildup['assist_type']} {float(assist.get('dt_sec') or 0):.1f}s trước dứt điểm"
+            delivery = {"cross": "quả tạt", "pass": "đường chuyền cuối"}.get(
+                str(buildup["assist_type"]), str(buildup["assist_type"])
             )
-        spatial_clause = f" Freeze-frame: {', '.join(spatial_bits)}." if spatial_bits else ""
-        if bundle.attack.goals:
+            spatial_bits.append(f"{delivery} đến {float(assist.get('dt_sec') or 0):.1f} giây trước cú sút")
+        spatial_clause = (
+            f" Ở khoảnh khắc dứt điểm, {', '.join(spatial_bits)}." if spatial_bits else ""
+        )
+        timeline = _timeline_read(bundle.sequence_context or {}, xg)
+        if bundle.attack.goals and "vào lưới" not in timeline:
             spatial_clause += " Cú dứt điểm thành bàn."
         claims = (
             EvidenceClaim(
@@ -261,9 +518,15 @@ class DeterministicEvidenceClient(LLMClient):
             chance_quality=chance,
             xg_probability=xg,
             tactical_read=(
-                f"Chuỗi {bundle.attack.duration_sec:.1f}s tiến {bundle.attack.progression_m:.1f} m "
-                f"với {bundle.attack.shots} dứt điểm.{spatial_clause} "
-                "Đây không phải nhãn hiệu quả đã xác thực."
+                (
+                    f"{timeline}{spatial_clause} "
+                    if timeline
+                    else (
+                        f"Chuỗi {bundle.attack.duration_sec:.1f}s tiến {bundle.attack.progression_m:.1f} m "
+                        f"với {bundle.attack.shots} dứt điểm.{spatial_clause} "
+                    )
+                )
+                + "Đây không phải nhãn hiệu quả đã xác thực."
             ),
             structural_features=tuple(features),
             comparison_to_role_benchmark=comparison,
@@ -425,19 +688,47 @@ class OpenAIResponsesClient(LLMClient):
             + "Keep metric names and identifiers in their original form.\n"
             + "Do not emit a categorical effectiveness label. Set abstained_effectiveness=true. "
             + "Cite only evidence_ids from the bundle (action_id, xg record, benchmark_id). "
-            + "Web search is context only; never use it for numeric xG or benchmark numbers."
+            + "Web search is context only; never use it for numeric xG or benchmark numbers.\n\n"
+            + "# Attack-v2 conclusion\n"
+            + "- Build tactical_read from sequence_context.events in the 'Analyst voice' of the skill: one "
+            + "opening sentence naming the mechanism, then the move as cause and effect through the phases, "
+            + "then the chance quality, the real outcome and one closing tactical takeaway. 5-7 sentences.\n"
+            + "- sequence_context.key_moments is authoritative for which event is the first entry into each zone, "
+            + "the largest forward gain, crosses, opponent touches and the terminal. Never move these moments "
+            + "to other events; events with no key moment are connecting play and get one short clause.\n"
+            + "- Locate moments by time from the first event in whole seconds (t_sec rounded, e.g. 'ở giây thứ 9') "
+            + "and shirt number (jersey, e.g. 'số 7'), not by step numbers. Omit the shirt number when jersey "
+            + "is missing.\n"
+            + "- Describe only what the events and freeze-frame show. Do not describe defenders' reactions, "
+            + "pressing, marking, transitions/counter-attacks or player intentions unless an event or "
+            + "freeze-frame field shows them. Leave out opponent_touch_after_terminal: it is not part of the attack.\n"
+            + "- structural_features: 4-6 short analyst notes (pattern, progression route, final-third entry, "
+            + "delivery, finishing location, outcome), each a plain phrase rather than 'field: value'.\n"
+            + "- Write one claim per key moment (progression, box entry, delivery, finish, xG, outcome) as a "
+            + "full analyst sentence, each citing the evidence_id of that event or record.\n"
+            + "- If shot_outcome is goal or no_goal, state it plainly; if unknown, say the outcome is not known.\n"
+            + "- Do not recompute distances or probabilities. Show xG with 2 decimals and metres as whole "
+            + "numbers ('gần 30 m').\n"
+            + f"- Write natural {response_language} for a football audience: translate zone/channel/action "
+            + "tokens and never put evidence_ids, field names or snake_case tokens in the text. Evidence IDs "
+            + "belong only in the evidence_ids arrays.\n"
+            + _glossary(response_language)
         )
+        conclusion_tools = [item for item in tools.schemas() if item.get("name") != "get_attack_evidence"]
         request: dict[str, Any] = {
             "model": self.model,
             "instructions": response_instructions,
             "input": (
                 "Write an Attack-v2 research conclusion from this evidence bundle. "
-                "Call verify_claims before the final answer. "
+                "Read sequence_context.events step by step first, then the xG and freeze-frame evidence. "
+                "The complete bundle is included below, so get_attack_evidence is not needed. "
+                "Call verify_claims once with all claims; only if it reports invalid claims, fix them and "
+                "verify again. "
                 "After verify_claims succeeds, copy the verified claims into the final JSON. "
                 f"Write in {response_language}.\n"
                 + json.dumps(bundle.to_dict(), ensure_ascii=False)
             ),
-            "tools": tools.schemas(),
+            "tools": conclusion_tools,
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -469,16 +760,23 @@ class OpenAIResponsesClient(LLMClient):
                 item.model_dump(exclude_none=True) if hasattr(item, "model_dump") else item
                 for item in response.output
             ]
+            rounds += 1
             response = self.client.responses.create(
                 model=self.model,
                 instructions=response_instructions,
                 input=response_items + tool_outputs,
-                tools=tools.schemas(),
+                tools=conclusion_tools,
+                tool_choice="none" if rounds >= self.max_tool_rounds else "auto",
                 text=request["text"],
                 store=False,
             )
-            rounds += 1
         payload = json.loads(response.output_text)
+        payload["tactical_read"] = _polish_text(str(payload.get("tactical_read") or ""), response_language)
+        payload["structural_features"] = [
+            _polish_text(str(item), response_language) for item in payload.get("structural_features") or ()
+        ]
+        for claim in payload.get("claims") or ():
+            claim["text"] = _polish_text(str(claim.get("text") or ""), response_language)
         payload.update(
             {
                 "model": self.model,

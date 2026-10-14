@@ -10,6 +10,7 @@ import random
 from typing import Mapping, Sequence
 
 from .models import (
+    ATTACK_QUALIFYING_STATUSES,
     AttackSequenceV2,
     PITCH_LENGTH,
     PITCH_WIDTH,
@@ -871,8 +872,8 @@ def score_confirmed_attack_xg_v2(
     if not isinstance(attack, AttackSequenceV2):
         raise TypeError("xG-v2 scoring requires an AttackSequenceV2")
     possession = attack.possession
-    if possession.status is not SequenceStatus.COMPLETE:
-        raise ValueError("censored or uncertain sequences cannot receive xG-v2")
+    if possession.status not in ATTACK_QUALIFYING_STATUSES:
+        raise ValueError("right-censored or uncertain sequences cannot receive xG-v2")
     if possession.source_tier is SourceTier.LEGACY_UNVALIDATED:
         raise ValueError("legacy_unvalidated sequences cannot receive xG-v2")
     terminal = attack.terminal

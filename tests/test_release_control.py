@@ -164,7 +164,7 @@ class FrozenReleaseTests(unittest.TestCase):
             censored["possession"]["status"] = "right_censored"
             censored_path = root / "censored.json"
             censored_path.write_text(json.dumps([censored]), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "only complete possessions"):
+            with self.assertRaisesRegex(ValueError, "observed end"):
                 _sequence_records(censored_path, human_gold=False)
 
             non_allowlisted = json.loads(json.dumps(valid))

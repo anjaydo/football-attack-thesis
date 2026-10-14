@@ -20,10 +20,10 @@ from .models import AttackSequenceV2
 PITCH_LENGTH_M = 105.0
 PITCH_WIDTH_M = 68.0
 GOAL_HALF_WIDTH_M = 3.66
-SCOREBOARD_CACHE_VERSION = 3
+SCOREBOARD_CACHE_VERSION = 4
 
 _DIGIT_LOOKALIKES = str.maketrans({"T": "1", "I": "1", "l": "1", "|": "1", "i": "1", "O": "0", "o": "0"})
-_TEAM_NAME = re.compile(r"[A-Z]{2,4}")
+_TEAM_NAME = re.compile(r"[A-Z][A-Z0-9]{1,3}")
 _SCORE = re.compile(r"\d{1,2}")
 _JOINED_SCORE = re.compile(r"^(\w{1,2})\s*[-:–]\s*(\w{1,2})$")
 
@@ -121,8 +121,10 @@ def _as_joined_score(text: str) -> tuple[int, int] | None:
 
 
 def _as_team_name(text: str) -> str | None:
-    value = text.strip()
-    return value.upper() if value.isalpha() and _TEAM_NAME.fullmatch(value.upper()) else None
+    value = text.strip().upper()
+    if not value.isalnum() or sum(character.isalpha() for character in value) < 1:
+        return None
+    return value if _TEAM_NAME.fullmatch(value) else None
 
 
 @dataclass(frozen=True)
@@ -188,7 +190,43 @@ def match_scoreboard_tokens(
             score_boxes=score_boxes,
         )
         return score, anchor
-    return None
+    return _match_stacked_scoreboard(items)
+
+
+def _match_stacked_scoreboard(
+    items: Sequence[tuple[str, Any, Any]],
+) -> tuple[tuple[int, int], ScoreboardAnchor] | None:
+    """Bundesliga-style bug: each team name sits directly above its own score."""
+
+    names = [(value, _box(token)) for kind, value, token in items if kind == "name"]
+    scores = [(value, _box(token)) for kind, value, token in items if kind == "score"]
+    columns: list[tuple[str, tuple[int, int, int, int], int, tuple[int, int, int, int]]] = []
+    for name, name_box in names:
+        name_height = max(1, name_box[3] - name_box[1])
+        below = [
+            (value, box)
+            for value, box in scores
+            if name_box[0] - name_height <= (box[0] + box[2]) / 2 <= name_box[2] + name_height
+            and box[1] >= (name_box[1] + name_box[3]) / 2
+            and box[1] - name_box[3] <= 2 * name_height
+        ]
+        if below:
+            value, box = min(below, key=lambda item: item[1][1])
+            columns.append((name, name_box, int(value), box))
+    if len(columns) < 2:
+        return None
+    columns.sort(key=lambda item: item[1][0])
+    home, away = columns[0], columns[1]
+    if home[3] == away[3]:
+        return None
+    anchor = ScoreboardAnchor(
+        home_name=home[0],
+        away_name=away[0],
+        home_box=home[1],
+        away_box=away[1],
+        score_boxes=(home[3], away[3]),
+    )
+    return (home[2], away[2]), anchor
 
 
 def parse_scoreboard_tokens(tokens: Sequence[Any]) -> tuple[int, int] | None:
@@ -203,7 +241,7 @@ class ScoreboardReader:
         self,
         *,
         step_sec: float = 1.0,
-        band_height: float = 0.12,
+        band_height: float = 0.2,
         band_width: float = 0.5,
         rescan_every: int = 5,
         max_detections: int = 30,

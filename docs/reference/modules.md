@@ -104,14 +104,25 @@ Registry file play-by-play dự đoán.
 - **Ưu tiên terminal:** headed (100) > shot (90) > forced out (80) > turnover/out/foul/offside/period_end (50); ưu tiên cùng đội đang kiểm soát.
 - **Gom cụm:** Δt ≤ 0.5 s và Δframe ≤ 14; tách cụm nếu đã có terminal mà gặp action kiểm soát/restart/terminal khác.
 - **Trạng thái:** gap > 8 s hoặc scene cut → censor phải rồi censor trái; replay không rõ → `uncertain`.
+- **Attack:** possession `complete` hoặc `left_censored` (kết thúc quan sát được) có terminal allowlist; `right_censored`/`uncertain` không bao giờ thành attack.
 
 ### `attack_v2_shot_insights.py`
 
 Audit cú sút cho UI.
 
 - `GoldOutcomeIndex.load(project_root)` đọc `data/attack-v2-{development,train}.jsonl`.
-- `resolve_shot_outcome` (gold → terminal → action), `format_shot_outcome`, `build_shot_insights` (`promoted` / `censored` / `unassigned`), `filter_sequence_entries`, `actions_with_resolved_outcome`.
-- Nhãn bộ lọc: `Confirmed Attack-v2`, `Shot terminal · bị censor`, `All possessions`.
+- `resolve_shot_outcome` (gold → scoreboard → terminal → action), `format_shot_outcome`, `build_shot_insights` (`promoted` / `censored` / `unassigned`), `filter_sequence_entries`, `actions_with_resolved_outcome`.
+- Nhãn bộ lọc: `Confirmed Attack-v2`, `Shot terminal · bị censor`, `All possessions` (UI thêm `Attack-v2 · bàn thắng`).
+
+### `scoreboard_goals.py`
+
+Goal truth cho FOOTPASS (dataset không có kết quả cú sút).
+
+- `stable_score_changes` / `goal_times_from_changes`: tỉ số giữ ≥ 3 lần đọc liên tiếp; tăng đúng 1 bàn mới tính, lần đọc lỗi bị đảo lại thì bỏ.
+- `restart_goal_times`: cú sút/đánh đầu → dừng ≥ 45 s → đội kia chơi bóng đầu tiên ở x ∈ [20, 60] (phần sân nhà, không phải phát bóng lên). Chỉ dùng khi feed không đọc được scoreboard (nguồn `event_restart`); trên 162 bàn có scoreboard: recall 0.73, precision 0.94.
+- `scoring_action`: cú sút/đánh đầu live cuối cùng trong 150 s trước khi tỉ số đổi, ưu tiên cú có ≥ 15 s dừng phía sau (ăn mừng).
+- `ScoreboardGoalIndex` đọc/ghi `data/footpass-scoreboard-goals.json`; `possession_outcomes` trả `possession_id → (goal | no_goal, source)`.
+- CLI: `attack-analysis build-scoreboard-goals <playbyplay_train.json> <playbyplay_val.json> [--video-root D:/videos]` (đọc cache `runs/goal-truth/<match>.readings.json`, bỏ qua frozen test).
 
 ### `v2_adapters.py`
 

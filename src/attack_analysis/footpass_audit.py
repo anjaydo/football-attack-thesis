@@ -7,7 +7,7 @@ from statistics import median
 
 from .attack_v2 import decode_footpass_attack_v2
 from .footpass import footpass_match_keys, prepare_footpass_actions_v2
-from .models import ATTACK_TERMINAL_ALLOWLIST
+from .models import ATTACK_QUALIFYING_STATUSES, ATTACK_TERMINAL_ALLOWLIST
 from .provenance import (
     MANIFEST_VERSION,
     build_provenance,
@@ -93,7 +93,9 @@ def audit_footpass_v2(
         "x_ge_70_gate": sum(value >= 70.0 for value in shot_x) / len(shot_x) >= 0.95,
     }
     invariants = {
-        "all_attacks_complete": all(item.possession.status.value == "complete" for item in all_attacks),
+        "all_attacks_end_observed": all(
+            item.possession.status in ATTACK_QUALIFYING_STATUSES for item in all_attacks
+        ),
         "all_attacks_have_allowlisted_terminal": all(
             item.terminal.terminal_type in ATTACK_TERMINAL_ALLOWLIST for item in all_attacks
         ),

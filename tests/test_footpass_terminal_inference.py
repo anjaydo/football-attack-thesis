@@ -61,6 +61,30 @@ class FootpassTerminalInferenceTests(unittest.TestCase):
         self.assertEqual(len(decoded.attacks), 1)
         self.assertEqual(decoded.attacks[0].terminal.terminal_type, TerminalType.HEADED_ATTEMPT)
 
+    def test_cross_mislabelled_as_replay_still_feeds_live_header(self) -> None:
+        raw = (
+            _action(1.0, "cross", "A", x=92.0, y=11.0),
+            _action(9.0, "drive", "A", x=92.0, y=63.0, replay=True),
+            _action(10.4, "cross", "A", x=97.0, y=65.0, replay=True),
+            _action(11.8, "header", "A", x=99.0, y=32.0),
+        )
+        inferred = infer_footpass_terminals(raw)
+        decoded = decode_footpass_attack_v2(inferred.actions)
+
+        self.assertIn("headed_attempt", inferred.actions[3].qualifiers)
+        self.assertEqual(len(decoded.attacks), 1)
+        self.assertEqual(decoded.attacks[0].possession.status, SequenceStatus.LEFT_CENSORED)
+
+        distant = infer_footpass_terminals(
+            (
+                _action(1.0, "pass", "A", x=50.0, y=34.0),
+                _action(5.0, "cross", "A", x=97.0, y=65.0, replay=True),
+                _action(30.0, "pass", "B", x=40.0, y=34.0),
+                _action(30.5, "header", "A", x=60.0, y=32.0),
+            )
+        )
+        self.assertNotIn("headed_attempt", distant.actions[3].qualifiers)
+
     def test_midfield_header_stays_generic(self) -> None:
         raw = (
             _action(1.0, "pass", "A", x=50.0, y=34.0),

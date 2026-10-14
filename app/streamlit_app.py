@@ -115,7 +115,14 @@ from attack_analysis.models import (
     AttackSequence,
     AttackSequenceV2,
     Event,
+    ObservedActionV2,
     PossessionSequenceV2,
+)
+from attack_analysis.scoreboard_goals import (
+    DEFAULT_SCOREBOARD_GOALS,
+    SCORING_LOOKBACK_SEC,
+    ScoreboardGoalIndex,
+    possession_outcomes as scoreboard_possession_outcomes,
 )
 from attack_analysis.possession import PossessionAssessment, assess_possession
 from attack_analysis.research import AttackConclusionV2, EvidenceBundle, EvaluationVerdict, insufficient_evidence_verdict
@@ -373,6 +380,19 @@ def load_attack_v2_analysis(
 @st.cache_resource(show_spinner=False)
 def load_gold_outcome_index():
     return GoldOutcomeIndex.load(PROJECT_ROOT)
+
+
+SEQUENCE_FILTER_GOALS = "Attack-v2 · bàn thắng"
+
+
+@st.cache_resource(show_spinner=False)
+def load_scoreboard_goal_index(modified: float | None) -> ScoreboardGoalIndex:
+    return ScoreboardGoalIndex.load(PROJECT_ROOT / DEFAULT_SCOREBOARD_GOALS)
+
+
+def scoreboard_goal_index() -> ScoreboardGoalIndex:
+    path = PROJECT_ROOT / DEFAULT_SCOREBOARD_GOALS
+    return load_scoreboard_goal_index(path.stat().st_mtime if path.is_file() else None)
 
 
 @st.cache_resource(show_spinner=False)
@@ -1382,12 +1402,22 @@ def _prediction_file_ok(registry: object, source: object) -> bool:
     return True
 
 
-analysis_tab, upload_tab, annotation_tab = st.tabs(
-    ["FOOTPASS analysis", "Video upload", "Annotation"]
-)
+def render_footpass_analysis(split: str) -> None:
+    """FOOTPASS Attack-v2 analysis on one dataset split (``train`` or ``val``)."""
 
-with analysis_tab:
-    mode = st.radio("Evidence mode", ("oracle", "predicted"), horizontal=True)
+    if split == "train":
+        st.caption(
+            "Phân tích các trận FOOTPASS split **train** (dữ liệu dùng để train model): "
+            f"`playbyplay_GT/playbyplay_train.json` và `data/train_tactical_data.h5`."
+        )
+    else:
+        st.caption(
+            "Phân tích các trận FOOTPASS split **validation** (game 18 / 24 / 47), "
+            "không dùng để train model."
+        )
+    mode = st.radio(
+        "Evidence mode", ("oracle", "predicted"), horizontal=True, key=f"{split}_evidence_mode"
+    )
     predicted_model = None
     event_model_name = None
     min_confidence = 0.0
@@ -1395,11 +1425,17 @@ with analysis_tab:
     selected_source = None
     selected_source_path: Path | None = None
     if mode == "predicted":
-        try:
-            registered_sources = list(prediction_source_choices())
-        except PredictionSourceError as error:
-            st.error(f"Prediction registry lỗi: {error}")
-            registered_sources = []
+        registered_sources = []
+        if split == "val":
+            try:
+                registered_sources = list(prediction_source_choices())
+            except PredictionSourceError as error:
+                st.error(f"Prediction registry lỗi: {error}")
+        else:
+            st.caption(
+                "Prediction registry chỉ đăng ký nguồn trên val. Split train đọc "
+                f"`playbyplay_PRED/playbyplay_<model>_{split}.json` nếu đã infer."
+            )
         if registered_sources:
             source_registry = load_prediction_registry()
             verified_indexes = [
@@ -1412,7 +1448,7 @@ with analysis_tab:
                 "Prediction source",
                 registered_sources,
                 index=default_source_index,
-                key="prediction_source",
+                key=f"{split}_prediction_source",
                 format_func=lambda item: (
                     f"{item.id} ({item.kind}, {item.role}"
                     + (f", F1 {item.micro_f1:.3f}" if item.micro_f1 is not None else "")
@@ -1439,6 +1475,7 @@ with analysis_tab:
                 "Action model",
                 ("DST", "TAAD"),
                 help="DST denoises the raw TAAD sequence and is the recommended predicted baseline.",
+                key=f"{split}_action_model",
             )
         event_model_name = selected_source.id if selected_source is not None else predicted_model
         min_confidence = st.slider(
@@ -1448,6 +1485,7 @@ with analysis_tab:
             0.15,
             0.05,
             help="0.15 is the official FOOTPASS evaluation threshold; use 0.60 for a precision-oriented ablation.",
+            key=f"{split}_min_confidence",
         )
         if selected_source is not None:
             source_profile = selected_source.resolved_threshold_profile(load_prediction_registry().path)
@@ -1461,6 +1499,7 @@ with analysis_tab:
                     f"Profile `{source_profile.name}` được fit cho đúng nguồn này "
                     "(tuning game 18, held-out game 24/47)."
                 ),
+                key=f"{split}_class_aware",
             )
             if use_calibrated_events:
                 class_threshold_items = tuple(sorted(load_event_thresholds(source_profile).items()))
@@ -1473,22 +1512,26 @@ with analysis_tab:
         if predicted_model == "TAAD":
             st.caption("Ablation only: TAAD thô không thay DST trên đường Attack-v2.")
     if mode == "oracle":
-        default_playbyplay = DEFAULT_FOOTPASS / "playbyplay_GT" / "playbyplay_val.json"
+        default_playbyplay = DEFAULT_FOOTPASS / "playbyplay_GT" / f"playbyplay_{split}.json"
     elif selected_source_path is not None:
         default_playbyplay = selected_source_path
     else:
         default_playbyplay = (
-            DEFAULT_FOOTPASS / "playbyplay_PRED" / f"playbyplay_{predicted_model}_val.json"
+            DEFAULT_FOOTPASS / "playbyplay_PRED" / f"playbyplay_{predicted_model}_{split}.json"
         )
     playbyplay = Path(
         st.text_input(
             "Play-by-play JSON",
             str(default_playbyplay),
-            key=f"playbyplay_{mode}_{event_model_name or 'oracle'}",
+            key=f"{split}_playbyplay_{mode}_{event_model_name or 'oracle'}",
         )
     )
     tactical = Path(
-        st.text_input("Tactical HDF5", str(DEFAULT_FOOTPASS / "data" / "val_tactical_data.h5"))
+        st.text_input(
+            "Tactical HDF5",
+            str(DEFAULT_FOOTPASS / "data" / f"{split}_tactical_data.h5"),
+            key=f"{split}_tactical_h5",
+        )
     )
     xg_model = DEFAULT_XG_V2_MODEL if DEFAULT_XG_V2_MODEL.is_file() else None
     if xg_model is not None:
@@ -1510,11 +1553,12 @@ with analysis_tab:
             "Khoảng im lặng dài hơn mức này thì possession bị censor, không bịa kết thúc. "
             "Pha đá bồi của cùng một đội trong 3 giây vẫn được nối vào chuỗi vừa sút."
         ),
+        key=f"{split}_max_gap",
     )
 
     if playbyplay.exists() and tactical.exists():
         keys = playbyplay_keys(str(playbyplay))
-        match_key = st.selectbox("Match half", keys)
+        match_key = st.selectbox("Match half", keys, key=f"{split}_match_half")
         analysis_data = load_attack_v2_analysis(
             str(playbyplay),
             match_key,
@@ -1571,21 +1615,65 @@ with analysis_tab:
         with st.expander("Audit shot → Attack-v2", expanded=False):
             render_shot_promotion_audit(shot_insights)
 
+        goal_truth = scoreboard_goal_index().for_match_key(match_key)
+        scoreboard_outcomes = scoreboard_possession_outcomes(
+            match_key,
+            tuple(ObservedActionV2.from_dict(item) for item in observed_actions_data),
+            tuple(PossessionSequenceV2.from_dict(item) for item in possessions_data),
+            scoreboard_goal_index(),
+        )
+        goal_possession_ids = {
+            possession_id
+            for possession_id, (outcome, _source) in scoreboard_outcomes.items()
+            if outcome == "goal"
+        }
+        attack_possession_ids = {item["possession"]["possession_id"] for item in attacks_data}
+        if goal_truth is None:
+            st.caption("Goal truth: chưa có scoreboard cho trận này (`attack-analysis build-scoreboard-goals`).")
+        else:
+            goal_source = (
+                "scoreboard trong video"
+                if goal_truth.source == "video_scoreboard"
+                else "suy từ event: dừng ≥45 s rồi đội kia giao bóng ở phần sân nhà (feed không đọc được scoreboard)"
+            )
+            half_start = observed_actions_data[0]["timestamp_sec"] if observed_actions_data else 0.0
+            half_end = observed_actions_data[-1]["timestamp_sec"] if observed_actions_data else 0.0
+            half_goals = sum(
+                half_start <= value <= half_end + SCORING_LOOKBACK_SEC
+                for value in goal_truth.goal_times_sec
+            )
+            st.caption(
+                f"Goal truth ({goal_source}): {half_goals} bàn trong hiệp · "
+                f"{len(goal_possession_ids & attack_possession_ids)} nằm trong danh sách Attack-v2"
+            )
+
         sequence_filter = st.radio(
             "Sequence filter",
             (
                 SEQUENCE_FILTER_CONFIRMED,
+                SEQUENCE_FILTER_GOALS,
                 SEQUENCE_FILTER_CENSORED_SHOT,
                 SEQUENCE_FILTER_ALL_POSSESSIONS,
             ),
             horizontal=True,
+            key=f"{split}_sequence_filter",
         )
         selected_values = filter_sequence_entries(
-            sequence_filter=sequence_filter,
+            sequence_filter=(
+                SEQUENCE_FILTER_CONFIRMED if sequence_filter == SEQUENCE_FILTER_GOALS else sequence_filter
+            ),
             possessions=possessions_data,
             attacks=attacks_data,
             censored_possession_ids=shot_insights.censored_possession_ids,
         )
+        if sequence_filter == SEQUENCE_FILTER_GOALS:
+            selected_values = [
+                (kind, item)
+                for kind, item in selected_values
+                if item["possession"]["possession_id"] in goal_possession_ids
+            ]
+            if not selected_values:
+                st.info("Không có bàn thắng nào trong hiệp này theo goal truth.")
         if sequence_filter == SEQUENCE_FILTER_CONFIRMED and not selected_values:
             st.warning(
                 "Không có terminal allowlist hoàn chỉnh ở operating point này; thử filter khác."
@@ -1601,10 +1689,15 @@ with analysis_tab:
                 terminal = possession.terminal
                 terminal_name = terminal.terminal_type.value if terminal is not None else "no terminal"
                 identifier = item.get("attack_id") if kind == "attack" else possession.possession_id
-                shot_outcome, _ = resolve_shot_outcome(possession, gold_index=gold_index)
+                shot_outcome, _ = resolve_shot_outcome(
+                    possession,
+                    gold_index=gold_index,
+                    scoreboard_outcomes=scoreboard_outcomes,
+                )
                 outcome_suffix = (
                     f" · {format_shot_outcome(shot_outcome)}" if shot_outcome else ""
                 )
+                goal_prefix = "GOAL · " if shot_outcome == "goal" else ""
                 ordered_ids = [action.action_id for action in possession.actions]
                 xg_values = [
                     float(item["xg_probability"])
@@ -1620,7 +1713,7 @@ with analysis_tab:
                 else:
                     xg_suffix = ""
                 return (
-                    f"{'ATTACK' if kind == 'attack' else possession.status.value.upper()} · "
+                    f"{goal_prefix}{'ATTACK' if kind == 'attack' else possession.status.value.upper()} · "
                     f"{identifier} · {possession.start_sec:.1f}-{possession.end_sec:.1f}s · "
                     f"{terminal_name}{outcome_suffix}{xg_suffix}"
                 )
@@ -1629,6 +1722,7 @@ with analysis_tab:
                 "Attack/Possession sequence",
                 tuple(range(len(selected_values))),
                 format_func=v2_sequence_label,
+                key=f"{split}_sequence_{match_key}_{sequence_filter}",
             )
             selected_kind, selected_payload = selected_values[selected_index]
             attack_v2 = (
@@ -1645,6 +1739,7 @@ with analysis_tab:
             shot_outcome, shot_outcome_source = resolve_shot_outcome(
                 possession_v2,
                 gold_index=gold_index,
+                scoreboard_outcomes=scoreboard_outcomes,
             )
             detail_columns = st.columns(6)
             detail_columns[0].metric("Status", possession_v2.status.value)
@@ -1745,7 +1840,7 @@ with analysis_tab:
                     if attack_v2 is not None
                     else possession_v2.possession_id
                 ),
-                source=f"footpass_{mode}",
+                source=f"footpass_{mode}" if split == "val" else f"footpass_{split}_{mode}",
             )
             st.markdown("#### Preview video sự kiện")
             if video_resolver.dual_video_enabled(match_key):
@@ -1832,7 +1927,10 @@ with analysis_tab:
                         xg_record=evidence.xg_record,
                         benchmarks=store,
                     )
-                    legacy_bundle = evidence.as_legacy_bundle()
+                    legacy_bundle = evidence.as_legacy_bundle(
+                        shot_outcome=shot_outcome,
+                        outcome_source=shot_outcome_source,
+                    )
                     tools = EvidenceToolRegistry(
                         {attack_v2.attack_id: legacy_bundle},
                         benchmarks=store,
@@ -1903,6 +2001,18 @@ with analysis_tab:
                 "Tactical HDF5 is required for oracle/predicted assisted source tiers and stable team identity."
             )
 
+
+analysis_tab, validation_tab, upload_tab, annotation_tab = st.tabs(
+    ["Analysis", "Validation Analysis", "Video upload", "Annotation"]
+)
+
+with analysis_tab:
+    render_footpass_analysis("train")
+
+with validation_tab:
+    render_footpass_analysis("val")
+
+
 def conclude_attack_v2(attack: AttackSequenceV2, *, frames=None, shot_outcome: dict | None = None):
     """Same research conclusion as the FOOTPASS tab: xG, chance quality, tactical read."""
 
@@ -1929,7 +2039,10 @@ def conclude_attack_v2(attack: AttackSequenceV2, *, frames=None, shot_outcome: d
         xg_record=evidence.xg_record,
         benchmarks=store,
     )
-    legacy_bundle = evidence.as_legacy_bundle()
+    legacy_bundle = evidence.as_legacy_bundle(
+        shot_outcome=str(shot_outcome.get("outcome")) if shot_outcome else None,
+        outcome_source="video_scoreboard_estimate" if shot_outcome else None,
+    )
     if shot_outcome:
         label = VIDEO_SHOT_OUTCOME_LABELS.get(str(shot_outcome.get("outcome")), "Chưa rõ")
         legacy_bundle = dataclass_replace(

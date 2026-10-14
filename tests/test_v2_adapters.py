@@ -95,7 +95,9 @@ class V2AdapterTests(unittest.TestCase):
             scene_cut_frames=(25,),
         )
         self.assertTrue(any(item.action_type == "scene_cut" for item in actions))
-        self.assertEqual(len(decoded.attacks), 0)
+        self.assertEqual(len(decoded.attacks), 1)
+        self.assertEqual(decoded.attacks[0].possession.status.value, "left_censored")
+        self.assertGreater(decoded.attacks[0].possession.start_frame, 25)
 
     def test_generic_converter_refuses_fused_claim(self) -> None:
         with self.assertRaisesRegex(ValueError, "fused"):
